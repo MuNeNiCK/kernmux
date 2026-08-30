@@ -227,6 +227,14 @@ impl HostCapabilities {
     }
 }
 
+impl FromIterator<HostCapability> for HostCapabilities {
+    fn from_iter<T: IntoIterator<Item = HostCapability>>(iter: T) -> Self {
+        Self {
+            supported: iter.into_iter().collect(),
+        }
+    }
+}
+
 /// Runtime feature discovered from Linux host interfaces.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum HostCapability {

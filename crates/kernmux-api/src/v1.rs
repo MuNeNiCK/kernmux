@@ -30,7 +30,10 @@ pub struct HostSnapshot {
     pub capabilities: Vec<Capability>,
     pub topology: CpuTopology,
     pub memory: HostMemory,
+    pub resource_pool: ResourcePool,
     pub instances: Vec<Instance>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transactions: Vec<Transaction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<Operation>,
 }
@@ -46,6 +49,7 @@ pub struct KernelInfo {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
+    Multikernel,
     InstanceLifecycle,
     DynamicResources,
     TransactionRollback,
@@ -95,6 +99,25 @@ pub struct HostMemory {
     pub assigned_bytes: u64,
 }
 
+/// CPU and memory resources delegated to peer kernels.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourcePool {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cpu_hardware_ids: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_cpu_hardware_ids: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub memory_regions: Vec<MemoryRegion>,
+}
+
+/// One contiguous memory region delegated to the resource pool.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MemoryRegion {
+    pub base: u64,
+    pub bytes: u64,
+    pub numa_node: u32,
+}
+
 /// One managed peer-kernel instance.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Instance {
@@ -103,8 +126,8 @@ pub struct Instance {
     pub generation: Generation,
     pub state: InstanceState,
     pub resources: ResourceAllocation,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub boot: Option<BootConfiguration>,
+    #[serde(default)]
+    pub image: KernelImage,
 }
 
 /// Lifecycle state observed from authoritative kernel state.
@@ -131,14 +154,10 @@ pub struct ResourceAllocation {
     pub device_ids: Vec<String>,
 }
 
-/// Boot artifacts and command line loaded for an instance.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct BootConfiguration {
-    pub kernel_image: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub initrd: Option<String>,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub command_line: String,
+/// Kernel image state authoritatively reported for an instance.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct KernelImage {
+    pub present: bool,
 }
 
 /// Generation precondition supplied with a mutation.
@@ -237,7 +256,8 @@ pub struct Actor {
 pub struct Transaction {
     pub id: String,
     pub state: TransactionState,
-    pub generation_before: Generation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_before: Option<Generation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_after: Option<Generation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -475,6 +495,15 @@ mod tests {
                 assignable_bytes: 2_147_483_648,
                 assigned_bytes: 1_073_741_824,
             },
+            resource_pool: ResourcePool {
+                cpu_hardware_ids: vec![4],
+                available_cpu_hardware_ids: Vec::new(),
+                memory_regions: vec![MemoryRegion {
+                    base: 0x4_0000_0000,
+                    bytes: 2_147_483_648,
+                    numa_node: 0,
+                }],
+            },
             instances: vec![Instance {
                 id: InstanceId(1),
                 name: "lab".into(),
@@ -486,8 +515,9 @@ mod tests {
                     memory_region: Some("instance-memory-0".into()),
                     device_ids: Vec::new(),
                 },
-                boot: None,
+                image: KernelImage { present: false },
             }],
+            transactions: Vec::new(),
             operations: Vec::new(),
         };
         round_trip(&snapshot);
@@ -495,7 +525,7 @@ mod tests {
         let transaction = Transaction {
             id: "transaction-1".into(),
             state: TransactionState::RolledBack,
-            generation_before: Generation(7),
+            generation_before: Some(Generation(7)),
             generation_after: Some(Generation(8)),
             diagnostics: vec![Diagnostic {
                 code: "placement_changed".into(),
@@ -517,6 +547,7 @@ mod tests {
                 "generation": 2,
                 "state": "ready",
                 "resources": {"memory_bytes": 0},
+                "image": {"present": false},
                 "future_field": {"enabled": true}
             }"#,
         )
