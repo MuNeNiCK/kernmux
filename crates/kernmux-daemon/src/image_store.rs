@@ -12,6 +12,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
+use kernmux_api::v1::Generation;
+
 const RECORD_SCHEMA_VERSION: u32 = 1;
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_RECORD_BYTES: u64 = 4096;
@@ -114,6 +116,123 @@ pub struct ArtifactRecord {
 pub struct ImageStore {
     root: PathBuf,
     max_artifact_bytes: u64,
+}
+
+/// Verified point-in-time view of the image catalog.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageCatalogSnapshot {
+    pub generation: Generation,
+    pub artifacts: Vec<ArtifactRecord>,
+}
+
+/// Generation-owning reconciliation layer around an [`ImageStore`].
+#[derive(Clone, Debug)]
+pub struct ImageCatalog {
+    store: ImageStore,
+    generation: Generation,
+    observed: Option<Vec<ArtifactRecord>>,
+}
+
+impl ImageCatalog {
+    /// Creates an unrefreshed catalog over an immutable store.
+    #[must_use]
+    pub const fn new(store: ImageStore) -> Self {
+        Self {
+            store,
+            generation: Generation(0),
+            observed: None,
+        }
+    }
+
+    /// Reconciles verified disk state and advances generation only on change.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed on catalog corruption, I/O errors, or generation overflow.
+    pub fn refresh(&mut self) -> Result<ImageCatalogSnapshot, ImageCatalogError> {
+        let artifacts = self.store.list()?;
+        if self.observed.as_ref() != Some(&artifacts) {
+            self.generation = Generation(
+                self.generation
+                    .0
+                    .checked_add(1)
+                    .ok_or(ImageCatalogError::GenerationExhausted)?,
+            );
+            self.observed = Some(artifacts.clone());
+        }
+        Ok(ImageCatalogSnapshot {
+            generation: self.generation,
+            artifacts,
+        })
+    }
+
+    /// Imports an artifact if the caller observed the current catalog generation.
+    ///
+    /// Idempotent imports leave the generation unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Rejects stale preconditions and propagates store or reconciliation failures.
+    pub fn import_path(
+        &mut self,
+        expected_generation: Generation,
+        kind: ArtifactKind,
+        source: impl AsRef<Path>,
+        expected_id: Option<&ArtifactId>,
+    ) -> Result<(ArtifactRecord, ImageCatalogSnapshot), ImageCatalogError> {
+        let before = self.refresh()?;
+        if expected_generation != before.generation {
+            return Err(ImageCatalogError::StaleGeneration {
+                expected: expected_generation,
+                actual: before.generation,
+            });
+        }
+        let artifact = self.store.import_path(kind, source, expected_id)?;
+        let after = self.refresh()?;
+        Ok((artifact, after))
+    }
+}
+
+/// Failure to reconcile or mutate the image catalog.
+#[derive(Debug)]
+pub enum ImageCatalogError {
+    StaleGeneration {
+        expected: Generation,
+        actual: Generation,
+    },
+    GenerationExhausted,
+    Store(ImageStoreError),
+}
+
+impl From<ImageStoreError> for ImageCatalogError {
+    fn from(error: ImageStoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl fmt::Display for ImageCatalogError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StaleGeneration { expected, actual } => write!(
+                formatter,
+                "image catalog generation changed from {} to {}",
+                expected.0, actual.0
+            ),
+            Self::GenerationExhausted => {
+                formatter.write_str("image catalog generation is exhausted")
+            }
+            Self::Store(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ImageCatalogError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            _ => None,
+        }
+    }
 }
 
 impl ImageStore {
@@ -827,5 +946,78 @@ mod tests {
             ImageStore::new(linked, 1024),
             Err(ImageStoreError::Corrupt(_))
         ));
+    }
+
+    #[test]
+    fn catalog_generation_changes_only_with_verified_state() {
+        let fixture = Fixture::new(1024);
+        let external = fixture.store.clone();
+        let mut catalog = ImageCatalog::new(fixture.store.clone());
+
+        assert_eq!(catalog.refresh().unwrap().generation, Generation(1));
+        assert_eq!(catalog.refresh().unwrap().generation, Generation(1));
+
+        let source = fixture.source("kernel", b"kernel");
+        external
+            .import_path(ArtifactKind::Kernel, source, None)
+            .unwrap();
+        let changed = catalog.refresh().unwrap();
+        assert_eq!(changed.generation, Generation(2));
+        assert_eq!(changed.artifacts.len(), 1);
+        assert_eq!(catalog.refresh().unwrap().generation, Generation(2));
+    }
+
+    #[test]
+    fn catalog_import_enforces_generation_and_is_idempotent() {
+        let fixture = Fixture::new(1024);
+        let source = fixture.source("kernel", b"kernel");
+        let mut catalog = ImageCatalog::new(fixture.store.clone());
+        assert_eq!(catalog.refresh().unwrap().generation, Generation(1));
+
+        let (artifact, imported) = catalog
+            .import_path(Generation(1), ArtifactKind::Kernel, &source, None)
+            .unwrap();
+        assert_eq!(imported.generation, Generation(2));
+        let (_, idempotent) = catalog
+            .import_path(
+                Generation(2),
+                ArtifactKind::Kernel,
+                &source,
+                Some(&artifact.id),
+            )
+            .unwrap();
+        assert_eq!(idempotent.generation, Generation(2));
+
+        let other = fixture.source("initrd", b"initrd");
+        assert!(matches!(
+            catalog.import_path(Generation(1), ArtifactKind::Initrd, other, None),
+            Err(ImageCatalogError::StaleGeneration {
+                expected: Generation(1),
+                actual: Generation(2)
+            })
+        ));
+        assert_eq!(catalog.refresh().unwrap().artifacts.len(), 1);
+    }
+
+    #[test]
+    fn catalog_fails_closed_without_advancing_on_corruption() {
+        let fixture = Fixture::new(1024);
+        let source = fixture.source("kernel", b"kernel");
+        let record = fixture
+            .store
+            .import_path(ArtifactKind::Kernel, source, None)
+            .unwrap();
+        let mut catalog = ImageCatalog::new(fixture.store.clone());
+        assert_eq!(catalog.refresh().unwrap().generation, Generation(1));
+        let blob = fixture.store.blob_path(&record.id);
+        fs::set_permissions(&blob, fs::Permissions::from_mode(0o644)).unwrap();
+        fs::write(&blob, b"broken").unwrap();
+        fs::set_permissions(&blob, fs::Permissions::from_mode(0o444)).unwrap();
+
+        assert!(matches!(
+            catalog.refresh(),
+            Err(ImageCatalogError::Store(ImageStoreError::Corrupt(_)))
+        ));
+        assert_eq!(catalog.generation, Generation(1));
     }
 }
