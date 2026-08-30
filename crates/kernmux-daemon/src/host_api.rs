@@ -10,8 +10,8 @@ use hyper::{Method, StatusCode};
 use kernmux_api::v1::{
     ApiError, CreateInstanceMutation, ErrorCode, EventPage, EventSequence, Generation,
     ImageArtifact, ImageKind, ImportImageMutation, InstanceId, InstanceLifecycleMutation,
-    LoadInstanceMutation, Operation, OperationId, OperationKind, ResourceKind,
-    ResourcePoolMutation, ResourceReference, Response, StopInstanceMutation,
+    LoadInstanceMutation, LoadManagedImageMutation, Operation, OperationId, OperationKind,
+    ResourceKind, ResourcePoolMutation, ResourceReference, Response, StopInstanceMutation,
     UpdateInstanceMutation,
 };
 
@@ -49,10 +49,19 @@ const MAX_COMMAND_LINE_BYTES: usize = 4096;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InstanceAction {
     Load,
+    LoadImage,
     Start,
     Stop,
     Unload,
     Console,
+}
+
+struct ManagedLoadRequest {
+    instance_id: InstanceId,
+    expected_generation: Generation,
+    kernel_id: ArtifactId,
+    initrd_id: Option<ArtifactId>,
+    command_line: Option<String>,
 }
 
 /// Canonical roots from which kernel and initrd files may be loaded.
@@ -455,28 +464,8 @@ where
                     audit_id,
                 )
             }
-            (Method::POST, Some(InstanceAction::Load)) => {
-                let mutation = decode::<LoadInstanceMutation>(&request.body)?;
-                let kernel = self.image_policy.resolve(&mutation.kernel_path)?;
-                let initrd = mutation
-                    .initrd_path
-                    .as_deref()
-                    .map(|path| self.image_policy.resolve(path))
-                    .transpose()?;
-                validate_command_line(mutation.command_line.as_deref())?;
-                self.submit_lifecycle(
-                    LifecycleRequest::Load(LoadRequest {
-                        instance: instance_request(mutation.expected_generation, instance_id),
-                        kernel,
-                        initrd,
-                        cmdline: mutation.command_line,
-                    }),
-                    OperationKind::LoadInstance,
-                    mutation.expected_generation,
-                    instance_id,
-                    peer,
-                    audit_id,
-                )
+            (Method::POST, Some(action @ (InstanceAction::Load | InstanceAction::LoadImage))) => {
+                self.dispatch_instance_load(action, &request.body, instance_id, peer, audit_id)
             }
             (Method::POST, Some(InstanceAction::Start)) => {
                 let mutation = decode::<InstanceLifecycleMutation>(&request.body)?;
@@ -522,6 +511,60 @@ where
             }
             _ => Err(not_found()),
         }
+    }
+
+    fn dispatch_instance_load(
+        &self,
+        action: InstanceAction,
+        body: &[u8],
+        instance_id: InstanceId,
+        peer: &PeerIdentity,
+        audit_id: Option<&str>,
+    ) -> Result<LocalResponse, ApiError> {
+        if action == InstanceAction::Load {
+            let mutation = decode::<LoadInstanceMutation>(body)?;
+            let kernel = self.image_policy.resolve(&mutation.kernel_path)?;
+            let initrd = mutation
+                .initrd_path
+                .as_deref()
+                .map(|path| self.image_policy.resolve(path))
+                .transpose()?;
+            validate_command_line(mutation.command_line.as_deref())?;
+            return self.submit_lifecycle(
+                LifecycleRequest::Load(LoadRequest {
+                    instance: instance_request(mutation.expected_generation, instance_id),
+                    kernel,
+                    initrd,
+                    cmdline: mutation.command_line,
+                }),
+                OperationKind::LoadInstance,
+                mutation.expected_generation,
+                instance_id,
+                peer,
+                audit_id,
+            );
+        }
+
+        let mutation = decode::<LoadManagedImageMutation>(body)?;
+        validate_command_line(mutation.command_line.as_deref())?;
+        let kernel_id =
+            ArtifactId::parse(mutation.kernel_id).map_err(|error| image_store_api_error(&error))?;
+        let initrd_id = mutation
+            .initrd_id
+            .map(ArtifactId::parse)
+            .transpose()
+            .map_err(|error| image_store_api_error(&error))?;
+        self.submit_managed_load(
+            ManagedLoadRequest {
+                instance_id,
+                expected_generation: mutation.expected_generation,
+                kernel_id,
+                initrd_id,
+                command_line: mutation.command_line,
+            },
+            peer,
+            audit_id,
+        )
     }
 
     fn snapshot(&self) -> Result<LocalResponse, ApiError> {
@@ -775,6 +818,73 @@ where
             .map_err(schedule_error)?;
         accepted_response(operation)
     }
+
+    fn submit_managed_load(
+        &self,
+        request: ManagedLoadRequest,
+        peer: &PeerIdentity,
+        audit_id: Option<&str>,
+    ) -> Result<LocalResponse, ApiError> {
+        let permit = self.limiter.acquire(LimitKind::Mutation)?;
+        let catalog = Arc::clone(&self.image_catalog);
+        let executor = Arc::clone(&self.lifecycle);
+        let instance_id = request.instance_id;
+        let expected_generation = request.expected_generation;
+        let operation = self
+            .scheduler
+            .submit(
+                new_operation(
+                    OperationKind::LoadInstance,
+                    expected_generation,
+                    ResourceReference {
+                        kind: ResourceKind::Instance,
+                        id: instance_id.0.to_string(),
+                    },
+                    peer,
+                    audit_id,
+                ),
+                move |cancellation| {
+                    let _permit = permit;
+                    if cancellation.is_cancelled() {
+                        return OperationTaskResult::cancelled(None);
+                    }
+                    let resolved = {
+                        let mut catalog = catalog
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        catalog
+                            .resolve(ArtifactKind::Kernel, &request.kernel_id)
+                            .and_then(|kernel| {
+                                request
+                                    .initrd_id
+                                    .as_ref()
+                                    .map(|id| catalog.resolve(ArtifactKind::Initrd, id))
+                                    .transpose()
+                                    .map(|initrd| (kernel, initrd))
+                            })
+                    };
+                    let (kernel, initrd) = match resolved {
+                        Ok(resolved) => resolved,
+                        Err(error) => {
+                            let (api_error, generation) = image_catalog_task_error(error);
+                            return OperationTaskResult::failed(api_error, generation);
+                        }
+                    };
+                    run_lifecycle(
+                        &executor,
+                        &LifecycleRequest::Load(LoadRequest {
+                            instance: instance_request(expected_generation, instance_id),
+                            kernel,
+                            initrd,
+                            cmdline: request.command_line,
+                        }),
+                        &cancellation,
+                    )
+                },
+            )
+            .map_err(schedule_error)?;
+        accepted_response(operation)
+    }
 }
 
 fn run_lifecycle<R, S>(
@@ -946,6 +1056,7 @@ fn instance_resource(path: &str) -> Option<(InstanceId, Option<InstanceAction>)>
     let action = match segments.next() {
         None => None,
         Some("load") => Some(InstanceAction::Load),
+        Some("load-image") => Some(InstanceAction::LoadImage),
         Some("start") => Some(InstanceAction::Start),
         Some("stop") => Some(InstanceAction::Stop),
         Some("unload") => Some(InstanceAction::Unload),
@@ -1121,6 +1232,12 @@ mod tests {
         );
         assert_eq!(
             route_for(&Method::POST, "/1.0/instances/1/start")
+                .unwrap()
+                .class,
+            RequestClass::Mutation
+        );
+        assert_eq!(
+            route_for(&Method::POST, "/1.0/instances/1/load-image")
                 .unwrap()
                 .class,
             RequestClass::Mutation

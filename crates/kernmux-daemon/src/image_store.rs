@@ -191,6 +191,20 @@ impl ImageCatalog {
         let after = self.refresh()?;
         Ok((artifact, after))
     }
+
+    /// Resolves one verified artifact to its immutable blob path.
+    ///
+    /// # Errors
+    ///
+    /// Fails closed if catalog state or blob contents cannot be verified.
+    pub fn resolve(
+        &mut self,
+        kind: ArtifactKind,
+        id: &ArtifactId,
+    ) -> Result<PathBuf, ImageCatalogError> {
+        self.refresh()?;
+        self.store.resolve(kind, id).map_err(Into::into)
+    }
 }
 
 /// Failure to reconcile or mutate the image catalog.
@@ -997,6 +1011,23 @@ mod tests {
             })
         ));
         assert_eq!(catalog.refresh().unwrap().artifacts.len(), 1);
+    }
+
+    #[test]
+    fn catalog_resolves_only_verified_kind_and_bytes() {
+        let fixture = Fixture::new(1024);
+        let source = fixture.source("kernel", b"managed kernel");
+        let mut catalog = ImageCatalog::new(fixture.store.clone());
+        let (record, _) = catalog
+            .import_path(Generation(1), ArtifactKind::Kernel, source, None)
+            .unwrap();
+
+        let path = catalog.resolve(ArtifactKind::Kernel, &record.id).unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"managed kernel");
+        assert!(matches!(
+            catalog.resolve(ArtifactKind::Initrd, &record.id),
+            Err(ImageCatalogError::Store(ImageStoreError::NotFound))
+        ));
     }
 
     #[test]

@@ -264,6 +264,17 @@ pub struct LoadInstanceMutation {
     pub command_line: Option<String>,
 }
 
+/// Loads an instance from immutable artifacts managed by the host.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LoadManagedImageMutation {
+    pub expected_generation: Generation,
+    pub kernel_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initrd_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_line: Option<String>,
+}
+
 /// Imports one administrator-controlled file into immutable image storage.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ImportImageMutation {
@@ -658,6 +669,12 @@ mod tests {
             expected_generation: Generation(7),
             kernel_path: "/var/lib/kernmux/images/vmlinux".into(),
             initrd_path: Some("/var/lib/kernmux/images/initrd".into()),
+            command_line: Some("console=mktty0".into()),
+        });
+        round_trip(&LoadManagedImageMutation {
+            expected_generation: Generation(7),
+            kernel_id: format!("sha256:{}", "c".repeat(64)),
+            initrd_id: Some(format!("sha256:{}", "d".repeat(64))),
             command_line: Some("console=mktty0".into()),
         });
         round_trip(&StopInstanceMutation {

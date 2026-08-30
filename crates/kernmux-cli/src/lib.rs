@@ -12,8 +12,8 @@ use std::{
 
 use kernmux_api::v1::{
     CreateInstanceMutation, Generation, ImageKind, ImportImageMutation, InstanceId,
-    InstanceLifecycleMutation, LoadInstanceMutation, ResourcePoolMutation, StopInstanceMutation,
-    UpdateInstanceMutation,
+    InstanceLifecycleMutation, LoadInstanceMutation, LoadManagedImageMutation,
+    ResourcePoolMutation, StopInstanceMutation, UpdateInstanceMutation,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -377,21 +377,7 @@ fn parse_instance(args: &[String]) -> Result<ApiRequest, CliError> {
                 },
             )
         }
-        "load" => {
-            let options =
-                Options::parse(tail, &["generation", "kernel", "initrd", "cmdline"], &[])?;
-            let id = number(options.one_positional("instance ID")?, "instance ID")?;
-            json_request(
-                "POST",
-                &format!("/1.0/instances/{id}/load"),
-                &LoadInstanceMutation {
-                    expected_generation: generation(options.required("generation")?)?,
-                    kernel_path: options.required("kernel")?.to_owned(),
-                    initrd_path: options.value("initrd").map(str::to_owned),
-                    command_line: options.value("cmdline").map(str::to_owned),
-                },
-            )
-        }
+        "load" | "load-image" => parse_instance_load(action, tail),
         "start" | "unload" | "delete" => {
             let options = Options::parse(tail, &["generation"], &[])?;
             let id = number(options.one_positional("instance ID")?, "instance ID")?;
@@ -423,6 +409,40 @@ fn parse_instance(args: &[String]) -> Result<ApiRequest, CliError> {
             )
         }
         _ => Err(CliError::usage("unknown instance action")),
+    }
+}
+
+fn parse_instance_load(action: &str, args: &[String]) -> Result<ApiRequest, CliError> {
+    let options = Options::parse(args, &["generation", "kernel", "initrd", "cmdline"], &[])?;
+    let id = number(options.one_positional("instance ID")?, "instance ID")?;
+    let expected_generation = generation(options.required("generation")?)?;
+    let command_line = options.value("cmdline").map(str::to_owned);
+    if action == "load" {
+        json_request(
+            "POST",
+            &format!("/1.0/instances/{id}/load"),
+            &LoadInstanceMutation {
+                expected_generation,
+                kernel_path: options.required("kernel")?.to_owned(),
+                initrd_path: options.value("initrd").map(str::to_owned),
+                command_line,
+            },
+        )
+    } else {
+        json_request(
+            "POST",
+            &format!("/1.0/instances/{id}/load-image"),
+            &LoadManagedImageMutation {
+                expected_generation,
+                kernel_id: artifact_id(options.required("kernel")?)?.to_owned(),
+                initrd_id: options
+                    .value("initrd")
+                    .map(artifact_id)
+                    .transpose()?
+                    .map(str::to_owned),
+                command_line,
+            },
+        )
     }
 }
 
@@ -898,6 +918,7 @@ Resources:
   instance create --generation N --id ID --name NAME --cpus LIST --memory SIZE
   instance update ID --generation N [--cpus LIST] [--memory SIZE] [--devices BDF[,BDF]] [--dry-run]
   instance load ID --generation N --kernel PATH [--initrd PATH] [--cmdline TEXT]
+  instance load-image ID --generation N --kernel ID [--initrd ID] [--cmdline TEXT]
   instance start ID --generation N
   instance stop ID --generation N [--force]
   instance unload ID --generation N
@@ -1048,6 +1069,29 @@ mod tests {
             ]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn parses_managed_image_load_without_store_paths() {
+        let kernel = format!("sha256:{}", "1".repeat(64));
+        let initrd = format!("sha256:{}", "2".repeat(64));
+        let invocation = parse_invocation(&strings(&[
+            "instance",
+            "load-image",
+            "4",
+            "--generation",
+            "9",
+            "--kernel",
+            &kernel,
+            "--initrd",
+            &initrd,
+        ]))
+        .unwrap();
+        assert_eq!(invocation.request.path, "/1.0/instances/4/load-image");
+        let body: Value = serde_json::from_slice(&invocation.request.body).unwrap();
+        assert_eq!(body["kernel_id"], kernel);
+        assert_eq!(body["initrd_id"], initrd);
+        assert!(body.get("kernel_path").is_none());
     }
 
     #[test]

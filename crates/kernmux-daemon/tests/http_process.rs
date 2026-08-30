@@ -195,6 +195,33 @@ fn serves_typed_api_across_the_process_and_socket_boundary() {
     assert_eq!(images.body["data"][0]["kind"], "kernel");
     assert_eq!(images.body["data"][0]["bytes"], 17);
 
+    let missing_load_body = serde_json::json!({
+        "expected_generation": snapshot.body["generation"],
+        "kernel_id": format!("sha256:{}", "0".repeat(64)),
+    })
+    .to_string();
+    let missing_load = daemon.request(&post("/1.0/instances/1/load-image", &missing_load_body));
+    assert_eq!(missing_load.status, 202);
+    let operation_path = format!(
+        "/1.0/operations/{}",
+        missing_load.body["operation"]["id"].as_str().unwrap()
+    );
+    let started = Instant::now();
+    loop {
+        let operation = daemon.request(&get(&operation_path, "process-e2e-missing-image"));
+        match operation.body["data"]["state"].as_str() {
+            Some("failed") => {
+                assert_eq!(operation.body["data"]["error"]["code"], "not_found");
+                break;
+            }
+            Some("succeeded" | "cancelled") => {
+                panic!("missing managed image was not rejected: {operation:?}")
+            }
+            _ if started.elapsed() < STARTUP_DEADLINE => thread::sleep(Duration::from_millis(10)),
+            _ => panic!("managed image load did not complete"),
+        }
+    }
+
     let malformed_mutation = daemon.request(&post("/1.0/instances", "{}"));
     assert_eq!(malformed_mutation.status, 400);
     assert_eq!(malformed_mutation.body["kind"], "error");
