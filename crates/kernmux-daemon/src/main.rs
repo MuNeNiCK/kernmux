@@ -1,6 +1,9 @@
 use std::{env, io, process::ExitCode};
 
-use kernmux_daemon::inventory::run_inventory_helper;
+use kernmux_daemon::{
+    inventory::run_inventory_helper,
+    service::{DaemonConfig, run},
+};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -25,5 +28,26 @@ fn main() -> ExitCode {
         api_major = kernmux_api::API_MAJOR_VERSION,
         "host management service initialized"
     );
-    ExitCode::SUCCESS
+
+    let config = match DaemonConfig::from_environment() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("invalid daemon configuration: {}", error.message);
+            return ExitCode::FAILURE;
+        }
+    };
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("failed to initialize async runtime: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(run(config)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("host management service failed: {error}");
+            ExitCode::FAILURE
+        }
+    }
 }

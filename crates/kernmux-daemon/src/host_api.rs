@@ -280,13 +280,14 @@ where
         peer: &PeerIdentity,
     ) -> Result<LocalResponse, ApiError> {
         let path = request.uri.path();
+        let audit_id = request.request_id.clone();
         match (&request.method, path) {
             (&Method::GET, "/1.0") => self.snapshot(),
             (&Method::GET, "/1.0/operations") => self.operations(),
             (&Method::GET, "/1.0/events") => self.events(request.uri.query()),
             (&Method::PUT, "/1.0/resource-pool") => {
                 let mutation = decode::<ResourcePoolMutation>(&request.body)?;
-                self.submit_resource_pool(mutation, peer)
+                self.submit_resource_pool(mutation, peer, audit_id.as_deref())
             }
             (&Method::POST, "/1.0/instances") => {
                 let mutation = decode::<CreateInstanceMutation>(&request.body)?;
@@ -302,6 +303,7 @@ where
                     mutation.expected_generation,
                     mutation.id,
                     peer,
+                    audit_id.as_deref(),
                 )
             }
             _ => self.dispatch_resource(request, peer),
@@ -313,6 +315,7 @@ where
         request: LocalRequest,
         peer: &PeerIdentity,
     ) -> Result<LocalResponse, ApiError> {
+        let audit_id = request.request_id.clone();
         if let Some(operation_id) = operation_id_from_path(request.uri.path()) {
             return match request.method {
                 Method::GET => self.operation(&operation_id),
@@ -323,7 +326,7 @@ where
         let Some((instance_id, action)) = instance_resource(request.uri.path()) else {
             return Err(not_found());
         };
-        self.dispatch_instance(request, peer, instance_id, action)
+        self.dispatch_instance(request, peer, instance_id, action, audit_id.as_deref())
     }
 
     fn dispatch_instance(
@@ -332,6 +335,7 @@ where
         peer: &PeerIdentity,
         instance_id: InstanceId,
         action: Option<InstanceAction>,
+        audit_id: Option<&str>,
     ) -> Result<LocalResponse, ApiError> {
         match (request.method, action) {
             (Method::GET, None) => self.instance(instance_id),
@@ -348,6 +352,7 @@ where
                     mutation.expected_generation,
                     instance_id,
                     peer,
+                    audit_id,
                 )
             }
             (Method::DELETE, None) => {
@@ -361,6 +366,7 @@ where
                     mutation.expected_generation,
                     instance_id,
                     peer,
+                    audit_id,
                 )
             }
             (Method::POST, Some(InstanceAction::Load)) => {
@@ -383,6 +389,7 @@ where
                     mutation.expected_generation,
                     instance_id,
                     peer,
+                    audit_id,
                 )
             }
             (Method::POST, Some(InstanceAction::Start)) => {
@@ -396,6 +403,7 @@ where
                     mutation.expected_generation,
                     instance_id,
                     peer,
+                    audit_id,
                 )
             }
             (Method::POST, Some(InstanceAction::Stop)) => {
@@ -409,6 +417,7 @@ where
                     mutation.expected_generation,
                     instance_id,
                     peer,
+                    audit_id,
                 )
             }
             (Method::POST, Some(InstanceAction::Unload)) => {
@@ -422,6 +431,7 @@ where
                     mutation.expected_generation,
                     instance_id,
                     peer,
+                    audit_id,
                 )
             }
             _ => Err(not_found()),
@@ -492,6 +502,7 @@ where
         expected_generation: Generation,
         instance_id: InstanceId,
         peer: &PeerIdentity,
+        audit_id: Option<&str>,
     ) -> Result<LocalResponse, ApiError> {
         let permit = self.limiter.acquire(LimitKind::Mutation)?;
         let executor = Arc::clone(&self.lifecycle);
@@ -506,6 +517,7 @@ where
                         id: instance_id.0.to_string(),
                     },
                     peer,
+                    audit_id,
                 ),
                 move |cancellation| {
                     let _permit = permit;
@@ -520,6 +532,7 @@ where
         &self,
         mutation: ResourcePoolMutation,
         peer: &PeerIdentity,
+        audit_id: Option<&str>,
     ) -> Result<LocalResponse, ApiError> {
         let permit = self.limiter.acquire(LimitKind::Mutation)?;
         let executor = Arc::clone(&self.resource_pool);
@@ -540,6 +553,7 @@ where
                         id: "host".into(),
                     },
                     peer,
+                    audit_id,
                 ),
                 move |cancellation| {
                     let _permit = permit;
@@ -686,13 +700,14 @@ fn new_operation(
     expected_generation: Generation,
     resource: ResourceReference,
     peer: &PeerIdentity,
+    audit_id: Option<&str>,
 ) -> NewOperation {
     NewOperation {
         kind,
         expected_generation,
         affected_resources: vec![resource],
         actor: Some(peer.actor.clone()),
-        audit_id: None,
+        audit_id: audit_id.map(str::to_owned),
         created_at: timestamp(),
     }
 }

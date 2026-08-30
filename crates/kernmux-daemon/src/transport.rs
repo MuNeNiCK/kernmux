@@ -3,6 +3,7 @@
 use std::{
     convert::Infallible,
     future::Future,
+    os::unix::fs::MetadataExt,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::Arc,
@@ -38,6 +39,7 @@ pub struct RouteSecurity {
 pub struct LocalRequest {
     pub method: Method,
     pub uri: Uri,
+    pub request_id: Option<String>,
     pub body: Vec<u8>,
 }
 
@@ -125,6 +127,7 @@ pub struct LocalHttpServer<A> {
     policy: AuthorizationPolicy,
     limiter: ServiceLimiter,
     api: Arc<A>,
+    socket_identity: (u64, u64),
 }
 
 impl<A> std::fmt::Debug for LocalHttpServer<A> {
@@ -164,13 +167,21 @@ where
             &config.socket_path,
             std::fs::Permissions::from_mode(config.socket_mode),
         )
-        .map_err(TransportError::Permissions)?;
+        .map_err(|error| {
+            let _ = std::fs::remove_file(&config.socket_path);
+            TransportError::Permissions(error)
+        })?;
+        let metadata = std::fs::metadata(&config.socket_path).map_err(|error| {
+            let _ = std::fs::remove_file(&config.socket_path);
+            TransportError::Permissions(error)
+        })?;
         Ok(Self {
             listener,
             config,
             policy,
             limiter,
             api,
+            socket_identity: (metadata.dev(), metadata.ino()),
         })
     }
 
@@ -233,6 +244,16 @@ where
     }
 }
 
+impl<A> Drop for LocalHttpServer<A> {
+    fn drop(&mut self) {
+        let matches_bound_socket = std::fs::metadata(&self.config.socket_path)
+            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == self.socket_identity);
+        if matches_bound_socket {
+            let _ = std::fs::remove_file(&self.config.socket_path);
+        }
+    }
+}
+
 async fn handle_request<A>(
     request: Request<Incoming>,
     api: Arc<A>,
@@ -249,8 +270,15 @@ where
             api_error(ErrorCode::NotFound, "API route was not found", false),
         ));
     };
+    let request_id = match request_id(request.headers()) {
+        Ok(request_id) => request_id,
+        Err(error) => {
+            audit(&peer, route, AuditDecision::Failed, None);
+            return Ok(error_response(StatusCode::BAD_REQUEST, error));
+        }
+    };
     if let Err(error) = policy.authorize(&peer.actor, route.class) {
-        audit(&peer, route, AuditDecision::Denied);
+        audit(&peer, route, AuditDecision::Denied, request_id.as_deref());
         return Ok(error_response(StatusCode::FORBIDDEN, error));
     }
     let (parts, body) = request.into_parts();
@@ -258,7 +286,7 @@ where
     let body = if let Ok(body) = collected {
         body.to_bytes().to_vec()
     } else {
-        audit(&peer, route, AuditDecision::Failed);
+        audit(&peer, route, AuditDecision::Failed, request_id.as_deref());
         return Ok(error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
             api_error(
@@ -271,15 +299,16 @@ where
     let request = LocalRequest {
         method: parts.method,
         uri: parts.uri,
+        request_id: request_id.clone(),
         body,
     };
     let peer_for_handler = peer.clone();
     let handled = tokio::task::spawn_blocking(move || api.handle(request, &peer_for_handler)).await;
     if let Ok(response) = handled {
-        audit(&peer, route, AuditDecision::Allowed);
+        audit(&peer, route, AuditDecision::Allowed, request_id.as_deref());
         Ok(to_http_response(response))
     } else {
-        audit(&peer, route, AuditDecision::Failed);
+        audit(&peer, route, AuditDecision::Failed, request_id.as_deref());
         Ok(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             internal_error("API request handler terminated unexpectedly"),
@@ -287,7 +316,12 @@ where
     }
 }
 
-fn audit(peer: &PeerIdentity, route: RouteSecurity, decision: AuditDecision) {
+fn audit(
+    peer: &PeerIdentity,
+    route: RouteSecurity,
+    decision: AuditDecision,
+    audit_id: Option<&str>,
+) {
     AuditEvent {
         actor: peer.actor.clone(),
         peer_pid: peer.pid,
@@ -295,9 +329,27 @@ fn audit(peer: &PeerIdentity, route: RouteSecurity, decision: AuditDecision) {
         resource: None,
         decision,
         operation_id: None,
-        audit_id: None,
+        audit_id: audit_id.map(str::to_owned),
     }
     .emit();
+}
+
+fn request_id(headers: &hyper::HeaderMap) -> Result<Option<String>, ApiError> {
+    let Some(value) = headers.get("x-request-id") else {
+        return Ok(None);
+    };
+    let value = value
+        .to_str()
+        .ok()
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 128
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+        .ok_or_else(|| api_error(ErrorCode::InvalidRequest, "request ID is invalid", false))?;
+    Ok(Some(value.to_owned()))
 }
 
 fn to_http_response(response: LocalResponse) -> HttpResponse<Full<Bytes>> {
@@ -415,6 +467,20 @@ mod tests {
             )
             .unwrap()
         }
+    }
+
+    #[test]
+    fn request_ids_are_bounded_log_safe_tokens() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("x-request-id", "request-1_ok.example".parse().unwrap());
+        assert_eq!(
+            request_id(&headers).unwrap().as_deref(),
+            Some("request-1_ok.example")
+        );
+        headers.insert("x-request-id", "bad value".parse().unwrap());
+        assert!(request_id(&headers).is_err());
+        headers.insert("x-request-id", "x".repeat(129).parse().unwrap());
+        assert!(request_id(&headers).is_err());
     }
 
     #[tokio::test]
