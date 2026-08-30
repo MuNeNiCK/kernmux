@@ -7,6 +7,7 @@ use std::{
     io::{self, Read, Seek},
     path::PathBuf,
     process::{Child, Command, ExitStatus, Stdio},
+    sync::{Arc, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -33,6 +34,44 @@ pub trait SnapshotRefresher {
     ///
     /// Returns the backend error when no snapshot can be produced.
     fn refresh_snapshot(&mut self) -> Result<HostSnapshot, Self::Error>;
+}
+
+/// Cloneable access to one generation-owning snapshot refresher.
+#[derive(Debug)]
+pub struct SharedSnapshotRefresher<S> {
+    inner: Arc<Mutex<S>>,
+}
+
+impl<S> SharedSnapshotRefresher<S> {
+    /// Wraps a refresher so every clone observes the same generation history.
+    #[must_use]
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(inner)),
+        }
+    }
+}
+
+impl<S> Clone for SharedSnapshotRefresher<S> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<S> SnapshotRefresher for SharedSnapshotRefresher<S>
+where
+    S: SnapshotRefresher,
+{
+    type Error = S::Error;
+
+    fn refresh_snapshot(&mut self) -> Result<HostSnapshot, Self::Error> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refresh_snapshot()
+    }
 }
 
 impl<S> SnapshotRefresher for InventoryService<S>
@@ -552,6 +591,20 @@ mod tests {
             stdout: Vec::new(),
             stderr: Vec::new(),
         }
+    }
+
+    #[test]
+    fn shared_refreshers_consume_one_generation_history() {
+        let mut first = SharedSnapshotRefresher::new(SequenceSnapshots {
+            values: VecDeque::from([
+                Ok(snapshot(7, None)),
+                Ok(snapshot(8, Some(InstanceState::Ready))),
+            ]),
+        });
+        let mut second = first.clone();
+
+        assert_eq!(first.refresh_snapshot().unwrap().generation, Generation(7));
+        assert_eq!(second.refresh_snapshot().unwrap().generation, Generation(8));
     }
 
     #[test]

@@ -19,7 +19,10 @@ use crate::{
     lifecycle::{
         CreateRequest, InstanceRequest, LifecycleRequest, LoadRequest, StopRequest, UpdateRequest,
     },
-    lifecycle_executor::{KerfRunner, LifecycleExecutor, ProcessKerfRunner, SnapshotRefresher},
+    lifecycle_executor::{
+        KerfRunner, LifecycleExecutor, ProcessKerfRunner, SharedSnapshotRefresher,
+        SnapshotRefresher,
+    },
     operations::{NewOperation, OperationRegistry, OperationRegistryError},
     resource_pool::{ResourcePoolExecutor, ResourcePoolRequest},
     scheduler::{
@@ -192,11 +195,11 @@ impl<I, LR, LS, PR, PS> HostApi<I, LR, LS, PR, PS> {
 
 /// Running-host dispatcher type used by `kernmuxd`.
 pub type RunningHostApi = HostApi<
-    InventoryService<ProcessInventorySource>,
+    SharedSnapshotRefresher<InventoryService<ProcessInventorySource>>,
     ProcessKerfRunner,
-    InventoryService<ProcessInventorySource>,
+    SharedSnapshotRefresher<InventoryService<ProcessInventorySource>>,
     ProcessKerfRunner,
-    InventoryService<ProcessInventorySource>,
+    SharedSnapshotRefresher<InventoryService<ProcessInventorySource>>,
 >;
 
 impl RunningHostApi {
@@ -214,14 +217,14 @@ impl RunningHostApi {
         let registry = OperationRegistry::new(config.operation_capacity, config.event_capacity)
             .map_err(HostApiBuildError::Registry)?;
         let scheduler = OperationScheduler::new(registry.clone(), timestamp);
-        let inventory = isolated_inventory(config.probe_deadline)?;
+        let inventory = SharedSnapshotRefresher::new(isolated_inventory(config.probe_deadline)?);
         let lifecycle = LifecycleExecutor::new(
             ProcessKerfRunner::system(config.kerf_deadline, config.kerf_output_limit),
-            isolated_inventory(config.probe_deadline)?,
+            inventory.clone(),
         );
         let resource_pool = ResourcePoolExecutor::new(
             ProcessKerfRunner::system(config.kerf_deadline, config.kerf_output_limit),
-            isolated_inventory(config.probe_deadline)?,
+            inventory.clone(),
         );
         let image_policy =
             ImagePolicy::new(config.image_roots).map_err(HostApiBuildError::Configuration)?;
