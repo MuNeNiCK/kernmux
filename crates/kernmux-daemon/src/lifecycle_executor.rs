@@ -558,7 +558,11 @@ mod tests {
                 assignable_bytes: 0,
                 assigned_bytes: 0,
             },
-            resource_pool: ResourcePool::default(),
+            resource_pool: ResourcePool {
+                cpu_hardware_ids: vec![4, 5, 6],
+                available_cpu_hardware_ids: vec![4, 5, 6],
+                memory_regions: Vec::new(),
+            },
             instances: state
                 .map(|state| Instance {
                     id: InstanceId(1),

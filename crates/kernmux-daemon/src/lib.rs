@@ -6,6 +6,7 @@ pub mod inventory;
 pub mod lifecycle;
 pub mod lifecycle_executor;
 pub mod operations;
+pub mod placement;
 pub mod resource_pool;
 pub mod scheduler;
 pub mod security;

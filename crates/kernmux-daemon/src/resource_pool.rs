@@ -10,6 +10,7 @@ use kernmux_api::v1::{
 use crate::{
     lifecycle::{ExpectedState, KerfInvocation},
     lifecycle_executor::{KerfRunResult, KerfRunner, SnapshotRefresher},
+    placement::{CpuPlacementError, validate_pool_cpus},
 };
 
 /// Desired Multikernel CPU and memory pool.
@@ -121,6 +122,7 @@ pub enum ResourcePoolPlanError {
         actual: Generation,
     },
     DuplicateCpu,
+    CpuPlacement(CpuPlacementError),
     AssignedResourcesExcluded,
 }
 
@@ -131,7 +133,7 @@ impl ResourcePoolPlanError {
         match self {
             Self::SnapshotIndeterminate => ErrorCode::BackendUnavailable,
             Self::StaleGeneration { .. } => ErrorCode::PreconditionFailed,
-            Self::DuplicateCpu => ErrorCode::InvalidRequest,
+            Self::DuplicateCpu | Self::CpuPlacement(_) => ErrorCode::InvalidRequest,
             Self::AssignedResourcesExcluded => ErrorCode::Conflict,
         }
     }
@@ -176,6 +178,8 @@ fn plan(
     if requested_cpus.len() != request.cpu_hardware_ids.len() {
         return Err(ResourcePoolPlanError::DuplicateCpu);
     }
+    validate_pool_cpus(snapshot, &request.cpu_hardware_ids)
+        .map_err(ResourcePoolPlanError::CpuPlacement)?;
     let assigned_memory = snapshot
         .instances
         .iter()
@@ -344,7 +348,7 @@ mod tests {
     use std::{collections::VecDeque, convert::Infallible};
 
     use kernmux_api::v1::{
-        CpuTopology, HostMemory, Instance, InstanceId, InstanceState, KernelImage, KernelInfo,
+        Cpu, CpuTopology, HostMemory, Instance, InstanceId, InstanceState, KernelImage, KernelInfo,
         MemoryRegion, ResourceAllocation, ResourcePool,
     };
 
@@ -385,7 +389,17 @@ mod tests {
             capabilities: Vec::new(),
             topology: CpuTopology {
                 architecture: "x86_64".into(),
-                cpus: Vec::new(),
+                cpus: (4..=7)
+                    .map(|hardware_id| Cpu {
+                        logical_id: hardware_id,
+                        hardware_id,
+                        package_id: 0,
+                        core_id: hardware_id,
+                        thread_index: 0,
+                        numa_node: 0,
+                        online: true,
+                    })
+                    .collect(),
                 numa_nodes: Vec::new(),
             },
             memory: HostMemory {

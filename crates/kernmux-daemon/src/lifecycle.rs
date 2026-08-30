@@ -4,6 +4,8 @@ use std::{collections::BTreeSet, ffi::OsString, fmt, path::PathBuf};
 
 use kernmux_api::v1::{ErrorCode, Generation, HostSnapshot, InstanceId, InstanceState};
 
+use crate::placement::{CpuPlacementError, validate_instance_cpus};
+
 /// A lifecycle mutation accepted by the host service.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LifecycleRequest {
@@ -146,6 +148,8 @@ fn plan_create(
     validate_name(&request.name)?;
     validate_id(request.id)?;
     validate_cpus(&request.cpu_hardware_ids)?;
+    validate_instance_cpus(snapshot, &request.cpu_hardware_ids, &[])
+        .map_err(LifecyclePlanError::CpuPlacement)?;
     if request.memory_bytes == 0 {
         return Err(LifecyclePlanError::InvalidRequest(
             "memory allocation must be greater than zero",
@@ -192,6 +196,8 @@ fn plan_update(
     let mut arguments = vec!["update".into(), instance.name.clone().into()];
     if let Some(cpus) = &request.cpu_hardware_ids {
         validate_cpus(cpus)?;
+        validate_instance_cpus(snapshot, cpus, &instance.resources.cpu_hardware_ids)
+            .map_err(LifecyclePlanError::CpuPlacement)?;
         arguments.push(option("--cpus=", cpu_list(cpus)));
     }
     if let Some(memory) = request.memory_bytes {
@@ -377,6 +383,7 @@ pub enum LifecyclePlanError {
         actual: Generation,
     },
     InvalidRequest(&'static str),
+    CpuPlacement(CpuPlacementError),
     NotFound,
     AlreadyExists,
     InvalidState {
@@ -393,7 +400,9 @@ impl LifecyclePlanError {
             Self::StaleGeneration { .. } => ErrorCode::PreconditionFailed,
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::NotFound => ErrorCode::NotFound,
-            Self::AlreadyExists | Self::InvalidState { .. } => ErrorCode::Conflict,
+            Self::CpuPlacement(_) | Self::AlreadyExists | Self::InvalidState { .. } => {
+                ErrorCode::Conflict
+            }
         }
     }
 }
@@ -407,6 +416,7 @@ impl fmt::Display for LifecyclePlanError {
                 expected.0, actual.0
             ),
             Self::InvalidRequest(message) => formatter.write_str(message),
+            Self::CpuPlacement(error) => write!(formatter, "CPU placement was rejected: {error}"),
             Self::NotFound => formatter.write_str("instance was not found"),
             Self::AlreadyExists => formatter.write_str("instance ID or name already exists"),
             Self::InvalidState { required, actual } => {
@@ -451,7 +461,11 @@ mod tests {
                 assignable_bytes: 0,
                 assigned_bytes: 0,
             },
-            resource_pool: ResourcePool::default(),
+            resource_pool: ResourcePool {
+                cpu_hardware_ids: vec![4, 5, 6],
+                available_cpu_hardware_ids: vec![4, 5, 6],
+                memory_regions: Vec::new(),
+            },
             instances: state
                 .map(|state| kernmux_api::v1::Instance {
                     id: InstanceId(1),
