@@ -1,0 +1,38 @@
+[workspace]
+members = [
+    "crates/kernmux-api",
+    "crates/kernmux-cli",
+    "crates/kernmux-core",
+    "crates/kernmux-daemon",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+publish = false
+license = "Apache-2.0"
+
+[workspace.dependencies]
+kernmux-api = { path = "crates/kernmux-api" }
+kernmux-core = { path = "crates/kernmux-core" }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
+
+[workspace.lints.rust]
+future_incompatible = { level = "warn", priority = -1 }
+nonstandard_style = { level = "warn", priority = -1 }
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+multiple_crate_versions = "allow"
+
+[profile.dev]
+debug = "limited"
+
+[profile.release]
+lto = "thin"

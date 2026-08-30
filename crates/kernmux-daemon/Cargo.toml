@@ -1,0 +1,21 @@
+[package]
+name = "kernmux-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "kernmuxd"
+path = "src/main.rs"
+
+[dependencies]
+kernmux-api.workspace = true
+kernmux-core.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
