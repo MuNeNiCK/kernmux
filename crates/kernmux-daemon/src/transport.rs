@@ -64,6 +64,17 @@ impl LocalResponse {
             })
             .map_err(|_| internal_error("response serialization failed"))
     }
+
+    /// Creates a typed JSON error envelope with the matching HTTP status.
+    #[must_use]
+    pub fn api_error(error: ApiError) -> Self {
+        let status = status_for_error(error.code);
+        Self::json(status, &Response::<()>::Error { error }).unwrap_or_else(|_| Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            content_type: "application/json",
+            body: br#"{"kind":"error","error":{"code":"internal","message":"response serialization failed","retryable":false}}"#.to_vec(),
+        })
+    }
 }
 
 /// Product API dispatcher behind the authenticated local transport.
@@ -306,6 +317,21 @@ fn error_response(status: StatusCode, error: ApiError) -> HttpResponse<Full<Byte
         body: br#"{"kind":"error","error":{"code":"internal","message":"response serialization failed","retryable":false}}"#.to_vec(),
     });
     to_http_response(response)
+}
+
+fn status_for_error(code: ErrorCode) -> StatusCode {
+    match code {
+        ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
+        ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
+        ErrorCode::Forbidden => StatusCode::FORBIDDEN,
+        ErrorCode::NotFound => StatusCode::NOT_FOUND,
+        ErrorCode::Conflict => StatusCode::CONFLICT,
+        ErrorCode::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
+        ErrorCode::Unsupported => StatusCode::NOT_IMPLEMENTED,
+        ErrorCode::BackendUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ErrorCode::Timeout => StatusCode::GATEWAY_TIMEOUT,
+        ErrorCode::Internal | ErrorCode::Unknown => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 fn api_error(code: ErrorCode, message: &str, retryable: bool) -> ApiError {

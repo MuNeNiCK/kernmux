@@ -20,6 +20,7 @@ fdt = "=0.1.5"
 http-body-util = "=0.1.5"
 hyper = { version = "=1.11.1", features = ["http1", "server"] }
 hyper-util = { version = "=0.1.20", features = ["tokio"] }
+jiff = "=0.2.35"
 kernmux-api = { path = "crates/kernmux-api" }
 kernmux-core = { path = "crates/kernmux-core" }
 serde = { version = "=1.0.229", features = ["derive"] }

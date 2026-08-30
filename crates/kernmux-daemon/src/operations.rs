@@ -206,6 +206,12 @@ impl OperationRegistry {
         self.lock().operations.iter().cloned().collect()
     }
 
+    /// Latest authoritative snapshot generation observed by operation events.
+    #[must_use]
+    pub fn latest_generation(&self) -> Generation {
+        self.lock().latest_generation
+    }
+
     /// Reads retained events after a client cursor.
     #[must_use]
     pub fn events_after(&self, cursor: EventSequence) -> EventBatch {
