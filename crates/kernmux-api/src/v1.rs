@@ -75,6 +75,163 @@ pub enum Capability {
     Unknown,
 }
 
+/// Compatibility contract shipped with one atomic Kernmux release.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseCompatibilityManifest {
+    pub schema_version: u32,
+    pub release_id: String,
+    pub os_id: String,
+    pub os_version_id: String,
+    pub architecture: String,
+    pub kernel_release: String,
+    pub required_capabilities: Vec<Capability>,
+    pub kerf_version: String,
+    pub kernmux_release: String,
+    pub kernmux_api_major: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daxfs_format: Option<u32>,
+    pub state_schema: StateSchemaCompatibility,
+}
+
+/// State versions that a release can safely read and write.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct StateSchemaCompatibility {
+    pub readable_min: u32,
+    pub readable_max: u32,
+    pub writable_min: u32,
+    pub writable_max: u32,
+}
+
+/// Read-only evidence collected from a running host.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostCompatibilityEvidence {
+    pub os_id: String,
+    pub os_version_id: String,
+    pub architecture: String,
+    pub kernel_release: String,
+    pub capabilities: Vec<Capability>,
+    pub kerf_version: String,
+    pub kernmux_release: String,
+    pub kernmux_api_major: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub daxfs_format: Option<u32>,
+    pub state_schema: u32,
+}
+
+/// Result of evaluating one running host against a release contract.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HostCompatibilityReport {
+    pub schema_version: u32,
+    pub release_id: String,
+    pub compatible: bool,
+    pub checks: Vec<CompatibilityCheck>,
+}
+
+/// One stable, machine-readable compatibility assertion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CompatibilityCheck {
+    pub name: String,
+    pub passed: bool,
+    pub expected: String,
+    pub observed: String,
+}
+
+impl ReleaseCompatibilityManifest {
+    /// Evaluates already-collected host evidence without mutating the host.
+    #[must_use]
+    pub fn evaluate(&self, evidence: &HostCompatibilityEvidence) -> HostCompatibilityReport {
+        let mut checks = Vec::new();
+        macro_rules! exact {
+            ($name:literal, $expected:expr, $observed:expr) => {{
+                let expected = $expected.to_string();
+                let observed = $observed.to_string();
+                checks.push(CompatibilityCheck {
+                    name: $name.into(),
+                    passed: expected == observed,
+                    expected,
+                    observed,
+                });
+            }};
+        }
+        exact!("manifest_schema", 1, self.schema_version);
+        exact!("os_id", &self.os_id, &evidence.os_id);
+        exact!(
+            "os_version_id",
+            &self.os_version_id,
+            &evidence.os_version_id
+        );
+        exact!("architecture", &self.architecture, &evidence.architecture);
+        exact!(
+            "kernel_release",
+            &self.kernel_release,
+            &evidence.kernel_release
+        );
+        exact!("kerf_version", &self.kerf_version, &evidence.kerf_version);
+        exact!(
+            "kernmux_release",
+            &self.kernmux_release,
+            &evidence.kernmux_release
+        );
+        exact!(
+            "kernmux_api_major",
+            self.kernmux_api_major,
+            evidence.kernmux_api_major
+        );
+
+        for capability in &self.required_capabilities {
+            checks.push(CompatibilityCheck {
+                name: format!("capability:{capability:?}").to_lowercase(),
+                passed: evidence.capabilities.contains(capability),
+                expected: "present".into(),
+                observed: if evidence.capabilities.contains(capability) {
+                    "present"
+                } else {
+                    "absent"
+                }
+                .into(),
+            });
+        }
+        if let Some(required) = self.daxfs_format {
+            checks.push(CompatibilityCheck {
+                name: "daxfs_format".into(),
+                passed: evidence.daxfs_format == Some(required),
+                expected: required.to_string(),
+                observed: evidence
+                    .daxfs_format
+                    .map_or_else(|| "absent".into(), |value| value.to_string()),
+            });
+        }
+        for (name, min, max) in [
+            (
+                "state_schema_readable",
+                self.state_schema.readable_min,
+                self.state_schema.readable_max,
+            ),
+            (
+                "state_schema_writable",
+                self.state_schema.writable_min,
+                self.state_schema.writable_max,
+            ),
+        ] {
+            checks.push(CompatibilityCheck {
+                name: name.into(),
+                passed: (min..=max).contains(&evidence.state_schema),
+                expected: format!("{min}..={max}"),
+                observed: evidence.state_schema.to_string(),
+            });
+        }
+        HostCompatibilityReport {
+            schema_version: 1,
+            release_id: self.release_id.clone(),
+            compatible: checks.iter().all(|check| check.passed),
+            checks,
+        }
+    }
+}
+
 /// CPU and NUMA topology used for placement and conflict validation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CpuTopology {
@@ -555,6 +712,75 @@ pub enum Response<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compatibility_fixture() -> (ReleaseCompatibilityManifest, HostCompatibilityEvidence) {
+        let manifest = ReleaseCompatibilityManifest {
+            schema_version: 1,
+            release_id: "2026.08".into(),
+            os_id: "ubuntu".into(),
+            os_version_id: "24.04".into(),
+            architecture: "x86_64".into(),
+            kernel_release: "7.0.0-mk2".into(),
+            required_capabilities: vec![Capability::Multikernel, Capability::Console],
+            kerf_version: "0.2.0".into(),
+            kernmux_release: "0.1.0".into(),
+            kernmux_api_major: 1,
+            daxfs_format: Some(8),
+            state_schema: StateSchemaCompatibility {
+                readable_min: 1,
+                readable_max: 2,
+                writable_min: 1,
+                writable_max: 1,
+            },
+        };
+        let evidence = HostCompatibilityEvidence {
+            os_id: manifest.os_id.clone(),
+            os_version_id: manifest.os_version_id.clone(),
+            architecture: manifest.architecture.clone(),
+            kernel_release: manifest.kernel_release.clone(),
+            capabilities: manifest.required_capabilities.clone(),
+            kerf_version: manifest.kerf_version.clone(),
+            kernmux_release: manifest.kernmux_release.clone(),
+            kernmux_api_major: manifest.kernmux_api_major,
+            daxfs_format: manifest.daxfs_format,
+            state_schema: 1,
+        };
+        (manifest, evidence)
+    }
+
+    #[test]
+    fn compatibility_evaluation_fails_closed_for_every_required_dimension() {
+        let (manifest, evidence) = compatibility_fixture();
+        assert!(manifest.evaluate(&evidence).compatible);
+
+        let mut missing_capability = evidence.clone();
+        missing_capability.capabilities.clear();
+        assert!(!manifest.evaluate(&missing_capability).compatible);
+
+        let mut wrong_version = evidence.clone();
+        wrong_version.kerf_version = "unknown".into();
+        assert!(!manifest.evaluate(&wrong_version).compatible);
+
+        let mut missing_daxfs = evidence.clone();
+        missing_daxfs.daxfs_format = None;
+        assert!(!manifest.evaluate(&missing_daxfs).compatible);
+
+        let mut unreadable_state = evidence;
+        unreadable_state.state_schema = 3;
+        assert!(!manifest.evaluate(&unreadable_state).compatible);
+    }
+
+    #[test]
+    fn optional_daxfs_is_not_required_and_manifest_is_strict() {
+        let (mut manifest, mut evidence) = compatibility_fixture();
+        manifest.daxfs_format = None;
+        evidence.daxfs_format = None;
+        assert!(manifest.evaluate(&evidence).compatible);
+
+        let mut value = serde_json::to_value(&manifest).unwrap();
+        value["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ReleaseCompatibilityManifest>(value).is_err());
+    }
     use serde::{Deserialize, Serialize};
 
     fn round_trip<T>(value: &T)
