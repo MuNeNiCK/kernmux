@@ -326,6 +326,7 @@ dependencies = [
  "kernmux-api",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

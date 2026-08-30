@@ -1,5 +1,7 @@
 //! Unprivileged automation client for the versioned Kernmux management API.
 
+mod diagnostics;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
@@ -155,6 +157,21 @@ fn execute(arguments: impl IntoIterator<Item = OsString>) -> Result<Output, CliE
             kernmux_api::API_MAJOR_VERSION
         )));
     }
+    if let Some(local) = parse_local_diagnostic(program_args)? {
+        let config = diagnostics::DiagnosticConfig::system(local.socket);
+        let report = diagnostics::diagnose(&config);
+        let code = if report.compatible {
+            ExitCode::Success
+        } else {
+            ExitCode::RequestRejected
+        };
+        return Ok(Output::Response {
+            value: serde_json::to_value(report)
+                .map_err(|_| CliError::protocol("diagnostic serialization failed"))?,
+            pretty: local.pretty,
+            code,
+        });
+    }
     let invocation = parse_invocation(program_args)?;
     let response = send_request(
         &invocation.socket,
@@ -172,6 +189,45 @@ fn execute(arguments: impl IntoIterator<Item = OsString>) -> Result<Output, CliE
         pretty: invocation.pretty,
         code,
     })
+}
+
+struct LocalDiagnosticInvocation {
+    socket: PathBuf,
+    pretty: bool,
+}
+
+fn parse_local_diagnostic(args: &[String]) -> Result<Option<LocalDiagnosticInvocation>, CliError> {
+    let mut socket = PathBuf::from(DEFAULT_SOCKET);
+    let mut pretty = false;
+    let mut index = 0;
+    while let Some(argument) = args.get(index) {
+        match argument.as_str() {
+            "--socket" => {
+                index += 1;
+                socket = args
+                    .get(index)
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .ok_or_else(|| CliError::usage("--socket requires a path"))?;
+            }
+            "--pretty" => pretty = true,
+            "--request-id" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| CliError::usage("--request-id requires a value"))?;
+                validate_request_id(value)?;
+            }
+            value if value.starts_with('-') => return Ok(None),
+            _ => break,
+        }
+        index += 1;
+    }
+    if args.get(index..) == Some(&[String::from("host"), String::from("diagnose")]) {
+        Ok(Some(LocalDiagnosticInvocation { socket, pretty }))
+    } else {
+        Ok(None)
+    }
 }
 
 fn parse_invocation(args: &[String]) -> Result<Invocation, CliError> {
@@ -911,6 +967,7 @@ Usage: kernmuxctl [--socket PATH] [--pretty] [--request-id ID] RESOURCE ACTION [
 Resources:
   host show
   host preflight
+  host diagnose
   pool show
   pool set --generation N --cpus LIST --memory SIZE
   pool release --generation N
@@ -956,6 +1013,26 @@ mod tests {
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/1.0/compatibility");
         assert!(request.body.is_empty());
+    }
+
+    #[test]
+    fn dispatches_host_diagnose_without_an_api_request() {
+        let invocation = parse_local_diagnostic(&strings(&[
+            "--pretty",
+            "--socket",
+            "/tmp/diagnostic.sock",
+            "host",
+            "diagnose",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert!(invocation.pretty);
+        assert_eq!(invocation.socket, PathBuf::from("/tmp/diagnostic.sock"));
+        assert!(
+            parse_local_diagnostic(&strings(&["host", "show"]))
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
