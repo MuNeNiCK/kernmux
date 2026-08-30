@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeSet,
+    os::fd::AsFd,
     os::unix::net::UnixStream,
     sync::{Arc, Mutex},
 };
@@ -17,13 +18,13 @@ pub struct PeerIdentity {
 }
 
 impl PeerIdentity {
-    /// Reads credentials fixed by the kernel when the socket connected.
+    /// Reads credentials from any connected Unix socket descriptor.
     ///
     /// # Errors
     ///
     /// Returns a redacted backend error when credentials cannot be read.
-    pub fn from_stream(stream: &UnixStream) -> Result<Self, ApiError> {
-        let credentials = socket_peercred(stream).map_err(|_| ApiError {
+    pub fn from_socket(socket: &impl AsFd) -> Result<Self, ApiError> {
+        let credentials = socket_peercred(socket).map_err(|_| ApiError {
             code: ErrorCode::BackendUnavailable,
             message: "peer credentials are unavailable".into(),
             retryable: false,
@@ -38,6 +39,15 @@ impl PeerIdentity {
                 label: None,
             },
         })
+    }
+
+    /// Reads credentials fixed by the kernel when the socket connected.
+    ///
+    /// # Errors
+    ///
+    /// Returns a redacted backend error when credentials cannot be read.
+    pub fn from_stream(stream: &UnixStream) -> Result<Self, ApiError> {
+        Self::from_socket(stream)
     }
 }
 

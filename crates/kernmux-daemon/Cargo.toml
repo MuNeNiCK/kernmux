@@ -14,11 +14,16 @@ name = "kernmuxd"
 path = "src/main.rs"
 
 [dependencies]
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 kernmux-api.workspace = true
 kernmux-core.workspace = true
 rustix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
