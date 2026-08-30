@@ -69,6 +69,10 @@ pub enum ExpectedState {
         cpu_hardware_ids: Option<Vec<u32>>,
         memory_bytes: Option<u64>,
     },
+    ResourcePool {
+        cpu_hardware_ids: Vec<u32>,
+        memory_bytes: u64,
+    },
     Absent(InstanceId),
 }
 

@@ -55,6 +55,7 @@ fn every_json_fixture_parses_and_uses_a_supported_version() {
         "host/topology.json",
         "kerf/init-report.json",
         "kerf/known-behaviors.json",
+        "kerf/partial-pool-release.json",
         "lifecycle/states.json",
     ] {
         let value = read_json(path);

@@ -1,0 +1,20 @@
+{
+  "fixture_version": 1,
+  "operation": "release-pool",
+  "process_exit_code": 1,
+  "transaction_status": "failed",
+  "before": {
+    "physical_apic_ids": [4, 5, 6, 7],
+    "memory_bytes": 2147483648
+  },
+  "requested": {
+    "physical_apic_ids": [],
+    "memory_bytes": 0
+  },
+  "observed": {
+    "physical_apic_ids": [],
+    "memory_bytes": 2147483648
+  },
+  "kernel_error": "pool resize returned EBUSY after CPU resources were returned",
+  "recovery": "reboot the isolated validation VM before reinitializing the lab"
+}

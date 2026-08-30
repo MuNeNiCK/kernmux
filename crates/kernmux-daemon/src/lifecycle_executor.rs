@@ -393,6 +393,28 @@ fn expected_state_observed(expected: &ExpectedState, snapshot: &HostSnapshot) ->
                 })
                 && memory_bytes.is_none_or(|expected| instance.resources.memory_bytes == expected)
         }),
+        ExpectedState::ResourcePool {
+            cpu_hardware_ids,
+            memory_bytes,
+        } => {
+            let observed_cpus = snapshot
+                .resource_pool
+                .cpu_hardware_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>();
+            let expected_cpus = cpu_hardware_ids
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>();
+            let observed_memory = snapshot
+                .resource_pool
+                .memory_regions
+                .iter()
+                .map(|region| region.bytes)
+                .sum::<u64>();
+            observed_cpus == expected_cpus && observed_memory == *memory_bytes
+        }
         ExpectedState::Absent(id) => snapshot.instances.iter().all(|instance| instance.id != *id),
     }
 }

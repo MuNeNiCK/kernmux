@@ -3,3 +3,4 @@
 pub mod inventory;
 pub mod lifecycle;
 pub mod lifecycle_executor;
+pub mod resource_pool;
