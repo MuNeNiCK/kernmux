@@ -57,7 +57,17 @@ pub struct ResourcePoolOutcome {
     pub snapshot: HostSnapshot,
     pub process: Option<KerfRunResult>,
     pub transition: ResourcePoolTransition,
+    pub recovery: ResourcePoolRecovery,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Safest next action after resource-pool reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResourcePoolRecovery {
+    None,
+    RefreshRequired,
+    RetryRequest,
+    HostRestartRequired,
 }
 
 /// Coordinates Kerf pool changes with authoritative postflight inventory.
@@ -218,8 +228,12 @@ fn reconcile<E>(
     process: Result<KerfRunResult, E>,
 ) -> ResourcePoolOutcome {
     let transition = transition(request, before, &after);
-    let (state, diagnostics) = if after.health != SnapshotHealth::Healthy {
-        (OperationState::Indeterminate, after.diagnostics.clone())
+    let (state, recovery, diagnostics) = if after.health != SnapshotHealth::Healthy {
+        (
+            OperationState::Indeterminate,
+            ResourcePoolRecovery::RefreshRequired,
+            after.diagnostics.clone(),
+        )
     } else if transition.request_reached() {
         let diagnostics = (!matches!(
             process.as_ref(),
@@ -234,11 +248,26 @@ fn reconcile<E>(
         })
         .into_iter()
         .collect();
-        (OperationState::Succeeded, diagnostics)
+        (
+            OperationState::Succeeded,
+            ResourcePoolRecovery::None,
+            diagnostics,
+        )
     } else {
         let partial = transition.partially_applied();
+        let recovery = if partial
+            && request.cpu_hardware_ids.is_empty()
+            && request.memory_bytes == 0
+            && transition.observed_cpu_hardware_ids.is_empty()
+            && transition.observed_memory_bytes != 0
+        {
+            ResourcePoolRecovery::HostRestartRequired
+        } else {
+            ResourcePoolRecovery::RetryRequest
+        };
         (
             OperationState::Failed,
+            recovery,
             vec![Diagnostic {
                 code: if partial {
                     "resource_pool_partially_applied"
@@ -263,6 +292,7 @@ fn reconcile<E>(
         snapshot: after,
         process: process.ok(),
         transition,
+        recovery,
         diagnostics,
     }
 }
@@ -410,6 +440,7 @@ mod tests {
         assert!(outcome.transition.partially_applied());
         assert_eq!(outcome.transition.returned_cpu_hardware_ids, [4, 5, 6, 7]);
         assert_eq!(outcome.transition.observed_memory_bytes, 2_147_483_648);
+        assert_eq!(outcome.recovery, ResourcePoolRecovery::HostRestartRequired);
         assert_eq!(
             outcome.diagnostics[0].code,
             "resource_pool_partially_applied"
@@ -433,6 +464,7 @@ mod tests {
         let outcome = executor.execute(&request).unwrap();
 
         assert_eq!(outcome.state, OperationState::Succeeded);
+        assert_eq!(outcome.recovery, ResourcePoolRecovery::None);
         assert_eq!(outcome.diagnostics[0].code, "kerf_result_reconciled");
     }
 
