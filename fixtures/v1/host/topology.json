@@ -1,0 +1,20 @@
+{
+  "fixture_version": 1,
+  "architecture": "x86_64",
+  "online_logical_cpus": [0, 1, 2, 3, 4, 5, 6, 7],
+  "cpus": [
+    {"logical_id": 0, "physical_apic_id": 0, "package_id": 0, "core_id": 0, "thread_index": 0, "numa_node": 0},
+    {"logical_id": 1, "physical_apic_id": 1, "package_id": 1, "core_id": 0, "thread_index": 0, "numa_node": 0},
+    {"logical_id": 2, "physical_apic_id": 2, "package_id": 2, "core_id": 0, "thread_index": 0, "numa_node": 0},
+    {"logical_id": 3, "physical_apic_id": 3, "package_id": 3, "core_id": 0, "thread_index": 0, "numa_node": 0},
+    {"logical_id": 4, "physical_apic_id": 4, "package_id": 4, "core_id": 0, "thread_index": 0, "numa_node": 0},
+    {"logical_id": 5, "physical_apic_id": 5, "package_id": 5, "core_id": 0, "thread_index": 0, "numa_node": 0},
+    {"logical_id": 6, "physical_apic_id": 6, "package_id": 6, "core_id": 0, "thread_index": 0, "numa_node": 0},
+    {"logical_id": 7, "physical_apic_id": 7, "package_id": 7, "core_id": 0, "thread_index": 0, "numa_node": 0}
+  ],
+  "limitations": [
+    "The default lab exposes one thread per core and cannot validate SMT sibling policy.",
+    "The default lab has one NUMA node and cannot validate cross-node placement."
+  ]
+}
+

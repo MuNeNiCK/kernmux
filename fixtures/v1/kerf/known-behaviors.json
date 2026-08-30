@@ -1,0 +1,38 @@
+{
+  "fixture_version": 1,
+  "behaviors": [
+    {
+      "id": "init-report-is-non-applying",
+      "command": "kerf init --cpus=4-7 --memory=2GB --report --format=json",
+      "exit_code": 0,
+      "kernel_mutated": false,
+      "implication": "Do not combine report generation and apply when driving Kerf 0.2.0."
+    },
+    {
+      "id": "create-post-apply-error",
+      "command": "kerf create lab --cpus=4-5 --memory=1GB --id=1",
+      "exit_code": 1,
+      "kernel_mutated": true,
+      "observed_state": "ready",
+      "transaction_id": 2,
+      "stderr_suffix": "KeyError: 'lab'",
+      "implication": "Always resnapshot sysfs after a mutation, regardless of process exit status."
+    },
+    {
+      "id": "non-root-iomem-masking",
+      "command": "kerf create unauthorized --cpus=6 --memory=256MB --id=3",
+      "actor": "unprivileged",
+      "exit_code": 1,
+      "kernel_mutated": false,
+      "diagnostic": "Pool chunk is not registered in /proc/iomem",
+      "implication": "Unprivileged validation can fail before the sysfs permission boundary because physical addresses are masked."
+    },
+    {
+      "id": "transaction-directory-rollback",
+      "action": "rmdir /sys/fs/multikernel/overlays/tx_3",
+      "before": "rollback instance ready",
+      "after": "rollback instance absent",
+      "resources_returned": true
+    }
+  ]
+}

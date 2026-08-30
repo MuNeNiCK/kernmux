@@ -1,0 +1,34 @@
+{
+  "fixture_version": 1,
+  "lab": {
+    "virtualization": "kvm",
+    "distribution": "ubuntu-24.04",
+    "vcpu_count": 8,
+    "memory_bytes": 17179869184,
+    "numa_nodes": 1
+  },
+  "sources": {
+    "linux": {
+      "repository": "https://github.com/multikernel/linux.git",
+      "commit": "ed3e74498f402cbe55210a9afdd8e9b0629c7714",
+      "release": "7.0.0-mk2-kernmux-mk+"
+    },
+    "lazy_cma": {
+      "repository": "https://github.com/multikernel/lazy_cma.git",
+      "commit": "46dc48719f08ccd628c082ac436b7011c48cc9b9",
+      "version": "1.0.0"
+    },
+    "daxfs": {
+      "repository": "https://github.com/multikernel/daxfs.git",
+      "commit": "11ab401585b79b4a7c9164019852e0219e197d13",
+      "version": "0.1.0",
+      "format_version": 8
+    },
+    "kerf": {
+      "repository": "https://github.com/multikernel/kerf.git",
+      "commit": "8b72b3e9b266f8d32e707e2c1743ad7afc50b1ec",
+      "version": "0.2.0"
+    }
+  }
+}
+

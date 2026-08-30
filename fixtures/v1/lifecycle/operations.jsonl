@@ -1,0 +1,11 @@
+{"sequence":1,"operation":"init","arguments":{"physical_apic_ids":[4,5,6,7],"memory_bytes":2147483648},"exit_code":0,"before":"empty-pool","after":"pool-ready","kernel_mutated":true,"transaction_id":null}
+{"sequence":2,"operation":"create","arguments":{"name":"lab","id":1,"physical_apic_ids":[4,5],"memory_bytes":1073741824},"exit_code":1,"before":"absent","after":"ready","kernel_mutated":true,"transaction_id":2,"diagnostic":"post-apply KeyError: lab"}
+{"sequence":3,"operation":"update-dry-run","arguments":{"name":"lab","physical_apic_ids":[4,5,6],"memory_bytes":1610612736},"exit_code":0,"before":"ready","after":"ready","kernel_mutated":false,"transaction_id":null}
+{"sequence":4,"operation":"load","arguments":{"name":"lab","kernel":"<VMLINUX>","initrd":"<INITRAMFS>","cmdline":"kerf.entrypoint=/bin/sh console=mktty0"},"exit_code":0,"before":"ready","after":"loaded","kernel_mutated":true,"transaction_id":null}
+{"sequence":5,"operation":"exec","arguments":{"name":"lab"},"exit_code":0,"before":"loaded","after":"active","kernel_mutated":true,"transaction_id":null}
+{"sequence":6,"operation":"console-probe","arguments":{"name":"lab","transport":"mktty"},"exit_code":0,"before":"active","after":"active","kernel_mutated":false,"transaction_id":null}
+{"sequence":7,"operation":"kill","arguments":{"name":"lab","force":false},"exit_code":0,"before":"active","after":"loaded","kernel_mutated":true,"transaction_id":null}
+{"sequence":8,"operation":"unload","arguments":{"name":"lab"},"exit_code":0,"before":"loaded","after":"ready","kernel_mutated":true,"transaction_id":null}
+{"sequence":9,"operation":"delete","arguments":{"name":"lab"},"exit_code":0,"before":"ready","after":"absent","kernel_mutated":true,"transaction_id":4}
+{"sequence":10,"operation":"release-pool","arguments":{"physical_apic_ids":[],"memory_bytes":0},"exit_code":0,"before":"pool-ready","after":"empty-pool","kernel_mutated":true,"transaction_id":5}
+

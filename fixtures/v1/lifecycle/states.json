@@ -1,0 +1,58 @@
+{
+  "fixture_version": 1,
+  "instance": {"name": "lab", "id": 1},
+  "states": [
+    {
+      "sequence": 0,
+      "state": "absent",
+      "sysfs_instance_present": false,
+      "kimage_present": false
+    },
+    {
+      "sequence": 1,
+      "state": "ready",
+      "sysfs_instance_present": true,
+      "status_file": "ready\n",
+      "kimage_present": false,
+      "resources": {"physical_apic_ids": [4, 5], "memory_region": "instance-memory-0", "memory_bytes": 1073741824}
+    },
+    {
+      "sequence": 2,
+      "state": "loaded",
+      "sysfs_instance_present": true,
+      "status_file": "loaded\n",
+      "kimage_present": true,
+      "kimage": {"type": "multikernel", "segments": 3, "mode": "file", "cmdline": "kerf.entrypoint=/bin/sh console=mktty0"}
+    },
+    {
+      "sequence": 3,
+      "state": "active",
+      "sysfs_instance_present": true,
+      "status_file": "active\n",
+      "kimage_present": true,
+      "console_probe": {"marker": "KERNMUX_CONSOLE_OK", "kernel_release": "7.0.0-mk2-kernmux-mk+"}
+    },
+    {
+      "sequence": 4,
+      "state": "loaded",
+      "cause": "graceful-kill",
+      "status_file": "loaded\n",
+      "kimage_present": true
+    },
+    {
+      "sequence": 5,
+      "state": "ready",
+      "cause": "unload",
+      "status_file": "ready\n",
+      "kimage_present": false
+    },
+    {
+      "sequence": 6,
+      "state": "absent",
+      "cause": "delete",
+      "sysfs_instance_present": false,
+      "kimage_present": false
+    }
+  ]
+}
+

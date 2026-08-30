@@ -1,0 +1,36 @@
+{
+  "fixture_version": 1,
+  "kernel": {
+    "release": "7.0.0-mk2-kernmux-mk+",
+    "config": {
+      "CONFIG_KEXEC_CORE": true,
+      "CONFIG_MULTIKERNEL": true,
+      "CONFIG_MKTTY": true,
+      "CONFIG_DMABUF_HEAPS": true,
+      "CONFIG_DAX": true,
+      "CONFIG_FS_DAX": true
+    }
+  },
+  "interfaces": {
+    "multikernel_fs": {
+      "mounted": true,
+      "mountpoint": "/sys/fs/multikernel",
+      "entries": ["device_tree", "instances", "overlays", "overlays/new"]
+    },
+    "devices": [
+      {"path": "/dev/mktty", "kind": "character", "mode": "0600"},
+      {"path": "/dev/lazy_cma", "kind": "character", "mode": "0600"},
+      {"path": "/dev/dma_heap/system", "kind": "character", "mode": "0600"},
+      {"path": "/dev/dma_heap/multikernel", "kind": "character", "mode": "0600"}
+    ]
+  },
+  "features": {
+    "lazy_cma_allocate_free": true,
+    "daxfs_system_heap_mount": true,
+    "daxfs_multikernel_heap_requires_pool": true,
+    "mktty_console": true,
+    "kerf_init_report": true,
+    "kerf_lifecycle": true
+  }
+}
+

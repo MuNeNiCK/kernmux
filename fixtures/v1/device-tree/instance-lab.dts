@@ -1,0 +1,13 @@
+/dts-v1/;
+
+/ {
+    lab {
+        compatible = "multikernel-v1";
+        id = <0x1>;
+        resources {
+            memory-base = <0x4 0x0000a000>;
+            memory-bytes = <0x0 0x40000000>;
+            cpus = <0x0 0x4 0x0 0x5>;
+        };
+    };
+};
