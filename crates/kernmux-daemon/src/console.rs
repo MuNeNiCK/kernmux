@@ -15,6 +15,19 @@ use kernmux_api::v1::{
 
 /// Largest binary payload accepted in one management-protocol frame.
 pub const DEFAULT_MAX_CONSOLE_FRAME_BYTES: usize = 64 * 1024;
+const MAX_CONSOLE_CONTROL_FRAME_BYTES: usize = 4 * 1024;
+
+/// HTTP Upgrade token and binary frame kinds for console protocol version 1.
+pub const CONSOLE_UPGRADE_PROTOCOL: &str = "kernmux-console-v1";
+pub const FRAME_ATTACHMENT: u8 = 0x01;
+pub const FRAME_INPUT: u8 = 0x10;
+pub const FRAME_READ: u8 = 0x11;
+pub const FRAME_DETACH: u8 = 0x12;
+pub const FRAME_RESIZE: u8 = 0x13;
+pub const FRAME_OUTPUT: u8 = 0x20;
+pub const FRAME_ACK: u8 = 0x21;
+pub const FRAME_CLOSED: u8 = 0x22;
+pub const FRAME_ERROR: u8 = 0x7f;
 
 const MAX_INSTANCE_ID: u32 = 511;
 
@@ -174,6 +187,26 @@ impl std::error::Error for ConsoleError {
             .map(|error| error as &(dyn std::error::Error + 'static))
     }
 }
+
+/// Failure while exchanging bounded console protocol frames.
+#[derive(Debug)]
+pub enum ConsoleProtocolError {
+    Io(io::Error),
+    Console(ConsoleError),
+    InvalidFrame,
+}
+
+impl std::fmt::Display for ConsoleProtocolError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(_) => formatter.write_str("console transport failed"),
+            Self::Console(error) => error.fmt(formatter),
+            Self::InvalidFrame => formatter.write_str("console frame is invalid"),
+        }
+    }
+}
+
+impl std::error::Error for ConsoleProtocolError {}
 
 /// One bounded read from a console stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -410,6 +443,129 @@ where
     }
 }
 
+/// Serves one request/response console stream over a binary-safe framed client.
+///
+/// Every frame is a one-byte kind followed by a big-endian `u32` payload
+/// length and payload bytes. The server sends attachment metadata first.
+/// Clients then send input, read, resize, or detach frames. Read and detach
+/// frames have empty payloads. Resize currently returns a typed error frame.
+///
+/// # Errors
+///
+/// Returns after malformed, oversized, device, serialization, or stream I/O
+/// failures. Dropping the session still releases its exclusive attachment.
+pub fn serve_framed_console<S, D>(
+    client: &mut S,
+    session: &mut ConsoleSession<D>,
+) -> Result<ConsoleCloseReason, ConsoleProtocolError>
+where
+    S: Read + Write,
+    D: Read + Write,
+{
+    let attachment = serde_json::to_vec(&session.attachment())
+        .map_err(|_| ConsoleProtocolError::InvalidFrame)?;
+    write_protocol_frame(client, FRAME_ATTACHMENT, &attachment)?;
+    loop {
+        let max_wire_payload =
+            (session.attachment().max_frame_bytes as usize).max(MAX_CONSOLE_CONTROL_FRAME_BYTES);
+        let Some((kind, payload)) = read_protocol_frame(client, max_wire_payload)? else {
+            return Ok(session.detach());
+        };
+        match kind {
+            FRAME_INPUT => match session.write_frame(&payload) {
+                Ok(()) => write_protocol_frame(client, FRAME_ACK, &[])?,
+                Err(error) => {
+                    write_console_error(client, &error)?;
+                    return Err(ConsoleProtocolError::Console(error));
+                }
+            },
+            FRAME_READ if payload.is_empty() => match session.read_frame() {
+                Ok(ConsoleRead::Data(data)) => {
+                    write_protocol_frame(client, FRAME_OUTPUT, &data)?;
+                }
+                Ok(ConsoleRead::Closed(reason)) => {
+                    write_close(client, reason)?;
+                    return Ok(reason);
+                }
+                Err(error) => {
+                    write_console_error(client, &error)?;
+                    return Err(ConsoleProtocolError::Console(error));
+                }
+            },
+            FRAME_DETACH if payload.is_empty() => {
+                let reason = session.detach();
+                write_close(client, reason)?;
+                return Ok(reason);
+            }
+            FRAME_RESIZE => {
+                let size = serde_json::from_slice::<ConsoleSize>(&payload)
+                    .map_err(|_| ConsoleProtocolError::InvalidFrame)?;
+                if let Err(error) = session.resize(size) {
+                    write_console_error(client, &error)?;
+                }
+            }
+            _ => return Err(ConsoleProtocolError::InvalidFrame),
+        }
+    }
+}
+
+fn read_protocol_frame(
+    stream: &mut impl Read,
+    max_payload: usize,
+) -> Result<Option<(u8, Vec<u8>)>, ConsoleProtocolError> {
+    let mut kind = [0_u8; 1];
+    match stream.read(&mut kind) {
+        Ok(0) => return Ok(None),
+        Ok(1) => {}
+        Ok(_) => unreachable!(),
+        Err(error) if error.kind() == io::ErrorKind::Interrupted => {
+            return read_protocol_frame(stream, max_payload);
+        }
+        Err(error) => return Err(ConsoleProtocolError::Io(error)),
+    }
+    let mut length = [0_u8; 4];
+    stream
+        .read_exact(&mut length)
+        .map_err(ConsoleProtocolError::Io)?;
+    let length = u32::from_be_bytes(length) as usize;
+    if length > max_payload {
+        return Err(ConsoleProtocolError::InvalidFrame);
+    }
+    let mut payload = vec![0; length];
+    stream
+        .read_exact(&mut payload)
+        .map_err(ConsoleProtocolError::Io)?;
+    Ok(Some((kind[0], payload)))
+}
+
+fn write_protocol_frame(
+    stream: &mut impl Write,
+    kind: u8,
+    payload: &[u8],
+) -> Result<(), ConsoleProtocolError> {
+    let length = u32::try_from(payload.len()).map_err(|_| ConsoleProtocolError::InvalidFrame)?;
+    write_all_retry(stream, &[kind]).map_err(ConsoleProtocolError::Io)?;
+    write_all_retry(stream, &length.to_be_bytes()).map_err(ConsoleProtocolError::Io)?;
+    write_all_retry(stream, payload).map_err(ConsoleProtocolError::Io)
+}
+
+fn write_console_error(
+    stream: &mut impl Write,
+    error: &ConsoleError,
+) -> Result<(), ConsoleProtocolError> {
+    let payload =
+        serde_json::to_vec(&error.api_error()).map_err(|_| ConsoleProtocolError::InvalidFrame)?;
+    write_protocol_frame(stream, FRAME_ERROR, &payload)
+}
+
+fn write_close(
+    stream: &mut impl Write,
+    reason: ConsoleCloseReason,
+) -> Result<(), ConsoleProtocolError> {
+    let payload = serde_json::to_vec(&reason).map_err(|_| ConsoleProtocolError::InvalidFrame)?;
+    write_protocol_frame(stream, FRAME_CLOSED, &payload)
+}
+
 fn write_selector(writer: &mut impl Write, data: &[u8]) -> io::Result<()> {
     loop {
         match writer.write(data) {
@@ -539,6 +695,47 @@ mod tests {
         )
     }
 
+    #[derive(Debug)]
+    struct ScriptedClient {
+        input: Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl Read for ScriptedClient {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            self.input.read(buffer)
+        }
+    }
+
+    impl Write for ScriptedClient {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn request_frame(kind: u8, payload: &[u8]) -> Vec<u8> {
+        let mut frame = vec![kind];
+        frame.extend_from_slice(&u32::try_from(payload.len()).unwrap().to_be_bytes());
+        frame.extend_from_slice(payload);
+        frame
+    }
+
+    fn response_frames(mut bytes: &[u8]) -> Vec<(u8, Vec<u8>)> {
+        let mut frames = Vec::new();
+        while !bytes.is_empty() {
+            let kind = bytes[0];
+            let length = u32::from_be_bytes(bytes[1..5].try_into().unwrap()) as usize;
+            frames.push((kind, bytes[5..5 + length].to_vec()));
+            bytes = &bytes[5 + length..];
+        }
+        frames
+    }
+
     #[test]
     fn attach_selects_instance_and_streams_binary_through_partial_writes() {
         let (device, output) = device(vec![0, 0xff, b'\n'], 1);
@@ -555,6 +752,50 @@ mod tests {
             output.lock().unwrap().as_slice(),
             [b'7', b'\n', 0xfe, 0, b'\r']
         );
+    }
+
+    #[test]
+    fn framed_protocol_negotiates_binary_io_resize_error_and_detach() {
+        let (device, output) = device(vec![0, 0xff], 8);
+        let proxy = ConsoleProxy::with_frame_limit(FakeFactory::new([device]), 8).unwrap();
+        let mut session = proxy.attach(InstanceId(7)).unwrap();
+        let mut requests = request_frame(FRAME_INPUT, &[0xfe, 0]);
+        requests.extend(request_frame(FRAME_READ, &[]));
+        requests.extend(request_frame(
+            FRAME_RESIZE,
+            &serde_json::to_vec(&ConsoleSize {
+                columns: 80,
+                rows: 25,
+            })
+            .unwrap(),
+        ));
+        requests.extend(request_frame(FRAME_DETACH, &[]));
+        let mut client = ScriptedClient {
+            input: Cursor::new(requests),
+            output: Vec::new(),
+        };
+
+        assert_eq!(
+            serve_framed_console(&mut client, &mut session).unwrap(),
+            ConsoleCloseReason::ClientDetached
+        );
+        let frames = response_frames(&client.output);
+        assert_eq!(
+            frames.iter().map(|frame| frame.0).collect::<Vec<_>>(),
+            [
+                FRAME_ATTACHMENT,
+                FRAME_ACK,
+                FRAME_OUTPUT,
+                FRAME_ERROR,
+                FRAME_CLOSED,
+            ]
+        );
+        assert_eq!(frames[2].1, [0, 0xff]);
+        assert_eq!(
+            serde_json::from_slice::<ConsoleCloseReason>(&frames[4].1).unwrap(),
+            ConsoleCloseReason::ClientDetached
+        );
+        assert_eq!(output.lock().unwrap().as_slice(), [b'7', b'\n', 0xfe, 0]);
     }
 
     #[test]
