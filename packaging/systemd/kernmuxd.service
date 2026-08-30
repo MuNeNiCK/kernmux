@@ -1,10 +1,13 @@
 [Unit]
 Description=Kernmux Multikernel host management service
-Documentation=https://github.com/kernmux/kernmux
+Documentation=https://github.com/MuNeNiCK/kernmux
 After=local-fs.target
+ConditionPathExists=/sys/fs/multikernel/device_tree
+ConditionPathExists=/etc/kernmux/release.json
 
 [Service]
 Type=simple
+ExecCondition=/usr/bin/env kerf --version
 ExecStart=/usr/bin/kernmuxd
 EnvironmentFile=-/etc/kernmux/kernmuxd.env
 User=root
