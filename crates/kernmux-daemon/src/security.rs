@@ -305,6 +305,7 @@ impl Drop for ServicePermit {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuditAction {
     ReadInventory,
+    ManageImages,
     MutateLifecycle,
     MutateResourcePool,
     CancelOperation,

@@ -50,6 +50,12 @@ impl DaemonConfig {
             }
             host.image_roots = roots;
         }
+        if let Some(value) = optional_string(&mut lookup, "KERNMUX_IMAGE_STORE_ROOT")? {
+            if value.is_empty() {
+                return Err(config_error("image store root must not be empty"));
+            }
+            host.image_store_root = value.into();
+        }
         if let Some(value) = optional_string(&mut lookup, "KERNMUX_ALLOW_UNPRIVILEGED_READS")? {
             authorization = authorization.with_unprivileged_reads(parse_bool(&value)?);
         }
@@ -96,6 +102,11 @@ impl DaemonConfig {
             &mut lookup,
             "KERNMUX_MAX_HEADER_BYTES",
             &mut transport.max_header_bytes,
+        )?;
+        override_u64(
+            &mut lookup,
+            "KERNMUX_MAX_IMAGE_BYTES",
+            &mut host.max_image_bytes,
         )?;
 
         host.service_limits.validate()?;
@@ -211,6 +222,21 @@ fn override_usize(
     Ok(())
 }
 
+fn override_u64(
+    lookup: &mut impl FnMut(&str) -> Option<OsString>,
+    name: &str,
+    target: &mut u64,
+) -> Result<(), ApiError> {
+    if let Some(value) = optional_string(lookup, name)? {
+        *target = value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| config_error("numeric limit must be greater than zero"))?;
+    }
+    Ok(())
+}
+
 fn config_error(message: &str) -> ApiError {
     ApiError {
         code: ErrorCode::InvalidRequest,
@@ -272,12 +298,19 @@ mod tests {
             ("KERNMUX_ADMINISTRATOR_GIDS", "2000"),
             ("KERNMUX_MAX_CONNECTIONS", "12"),
             ("KERNMUX_SOCKET_MODE", "600"),
+            ("KERNMUX_IMAGE_STORE_ROOT", "/srv/kernmux/images"),
+            ("KERNMUX_MAX_IMAGE_BYTES", "8192"),
         ]);
         let config =
             DaemonConfig::from_lookup(|name| values.get(name).map(OsString::from)).unwrap();
 
         assert_eq!(config.host.service_limits.connections, 12);
         assert_eq!(config.transport.socket_mode, 0o600);
+        assert_eq!(
+            config.host.image_store_root,
+            std::path::Path::new("/srv/kernmux/images")
+        );
+        assert_eq!(config.host.max_image_bytes, 8192);
         assert_eq!(
             config
                 .authorization
@@ -299,6 +332,12 @@ mod tests {
         assert!(
             DaemonConfig::from_lookup(|name| {
                 (name == "KERNMUX_OPERATOR_UIDS").then(|| "not-a-uid".into())
+            })
+            .is_err()
+        );
+        assert!(
+            DaemonConfig::from_lookup(|name| {
+                (name == "KERNMUX_MAX_IMAGE_BYTES").then(|| "0".into())
             })
             .is_err()
         );

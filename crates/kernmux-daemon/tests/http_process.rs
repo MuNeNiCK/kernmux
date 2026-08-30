@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 
 use std::{
+    fs,
     io::{Read, Write},
     os::unix::net::UnixStream,
     path::{Path, PathBuf},
@@ -18,6 +19,7 @@ const STARTUP_DEADLINE: Duration = Duration::from_secs(5);
 struct DaemonProcess {
     child: Child,
     socket_path: PathBuf,
+    import_path: PathBuf,
     _directory: TempDir,
 }
 
@@ -25,10 +27,13 @@ impl DaemonProcess {
     fn spawn() -> Self {
         let directory = TempDir::new().expect("daemon test directory must be created");
         let socket_path = directory.path().join("kernmuxd.sock");
+        let import_path = directory.path().join("vmlinux");
+        fs::write(&import_path, b"test kernel image").expect("test image must be written");
         let child = Command::new(env!("CARGO_BIN_EXE_kernmuxd"))
             .env("KERNMUX_SOCKET_PATH", &socket_path)
-            .env("KERNMUX_IMAGE_ROOTS", "/boot")
-            .env("KERNMUX_OPERATOR_UIDS", getuid().as_raw().to_string())
+            .env("KERNMUX_IMAGE_ROOTS", directory.path())
+            .env("KERNMUX_IMAGE_STORE_ROOT", directory.path().join("images"))
+            .env("KERNMUX_ADMINISTRATOR_UIDS", getuid().as_raw().to_string())
             .env("RUST_LOG", "error")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -38,6 +43,7 @@ impl DaemonProcess {
         let mut process = Self {
             child,
             socket_path,
+            import_path,
             _directory: directory,
         };
         process.wait_until_ready();
@@ -102,6 +108,7 @@ impl Drop for DaemonProcess {
     }
 }
 
+#[derive(Debug)]
 struct HttpResult {
     status: u16,
     body: Value,
@@ -153,6 +160,40 @@ fn serves_typed_api_across_the_process_and_socket_boundary() {
     let events = daemon.request(&get("/1.0/events?after=0", "process-e2e-events"));
     assert_eq!(events.status, 200);
     assert_eq!(events.body["kind"], "result");
+
+    let images = daemon.request(&get("/1.0/images", "process-e2e-images"));
+    assert_eq!(images.status, 200);
+    assert_eq!(images.body["generation"], 1);
+    assert_eq!(images.body["data"], serde_json::json!([]));
+
+    let import_body = serde_json::json!({
+        "expected_generation": 1,
+        "kind": "kernel",
+        "source_path": daemon.import_path,
+    })
+    .to_string();
+    let import = daemon.request(&post("/1.0/images", &import_body));
+    assert_eq!(import.status, 202);
+    assert_eq!(import.body["kind"], "accepted");
+    let operation_path = format!(
+        "/1.0/operations/{}",
+        import.body["operation"]["id"].as_str().unwrap()
+    );
+    let started = Instant::now();
+    loop {
+        let operation = daemon.request(&get(&operation_path, "process-e2e-image-operation"));
+        match operation.body["data"]["state"].as_str() {
+            Some("succeeded") => break,
+            Some("failed" | "cancelled") => panic!("image import did not succeed: {operation:?}"),
+            _ if started.elapsed() < STARTUP_DEADLINE => thread::sleep(Duration::from_millis(10)),
+            _ => panic!("image import did not complete"),
+        }
+    }
+    let images = daemon.request(&get("/1.0/images", "process-e2e-images-after-import"));
+    assert_eq!(images.status, 200);
+    assert_eq!(images.body["generation"], 2);
+    assert_eq!(images.body["data"][0]["kind"], "kernel");
+    assert_eq!(images.body["data"][0]["bytes"], 17);
 
     let malformed_mutation = daemon.request(&post("/1.0/instances", "{}"));
     assert_eq!(malformed_mutation.status, 400);

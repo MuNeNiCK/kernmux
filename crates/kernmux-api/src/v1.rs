@@ -196,6 +196,25 @@ pub struct KernelImage {
     pub present: bool,
 }
 
+/// Semantic use of one immutable image artifact.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageKind {
+    Kernel,
+    Initrd,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One verified content-addressed image artifact.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ImageArtifact {
+    pub schema_version: u32,
+    pub kind: ImageKind,
+    pub id: String,
+    pub bytes: u64,
+}
+
 /// Generation precondition supplied with a mutation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MutationPrecondition {
@@ -243,6 +262,16 @@ pub struct LoadInstanceMutation {
     pub initrd_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command_line: Option<String>,
+}
+
+/// Imports one administrator-controlled file into immutable image storage.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ImportImageMutation {
+    pub expected_generation: Generation,
+    pub kind: ImageKind,
+    pub source_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_id: Option<String>,
 }
 
 /// Applies a lifecycle transition to an existing instance.
@@ -297,6 +326,7 @@ pub enum OperationKind {
     UnloadInstance,
     DeleteInstance,
     OpenConsole,
+    ImportImage,
     #[serde(other)]
     Unknown,
 }
@@ -331,6 +361,7 @@ pub enum ResourceKind {
     Instance,
     Device,
     Console,
+    Image,
     #[serde(other)]
     Unknown,
 }
@@ -632,6 +663,18 @@ mod tests {
         round_trip(&StopInstanceMutation {
             expected_generation: Generation(8),
             force: false,
+        });
+        round_trip(&ImportImageMutation {
+            expected_generation: Generation(9),
+            kind: ImageKind::Kernel,
+            source_path: "/var/lib/kernmux/import/vmlinux".into(),
+            expected_id: Some(format!("sha256:{}", "a".repeat(64))),
+        });
+        round_trip(&ImageArtifact {
+            schema_version: 1,
+            kind: ImageKind::Initrd,
+            id: format!("sha256:{}", "b".repeat(64)),
+            bytes: 4096,
         });
     }
 

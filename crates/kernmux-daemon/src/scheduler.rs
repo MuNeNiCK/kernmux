@@ -68,6 +68,16 @@ impl OperationTaskResult {
             error: None,
         }
     }
+
+    /// Creates a failed task result with an API-safe error.
+    #[must_use]
+    pub const fn failed(error: ApiError, generation: Option<Generation>) -> Self {
+        Self {
+            state: OperationState::Failed,
+            observed_generation: generation,
+            error: Some(error),
+        }
+    }
 }
 
 /// Converts a reconciled lifecycle result into an operation terminal result.

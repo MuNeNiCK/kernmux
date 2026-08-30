@@ -8,14 +8,19 @@ use std::{
 
 use hyper::{Method, StatusCode};
 use kernmux_api::v1::{
-    ApiError, CreateInstanceMutation, ErrorCode, EventPage, EventSequence, Generation, InstanceId,
-    InstanceLifecycleMutation, LoadInstanceMutation, Operation, OperationId, OperationKind,
-    ResourceKind, ResourcePoolMutation, ResourceReference, Response, StopInstanceMutation,
+    ApiError, CreateInstanceMutation, ErrorCode, EventPage, EventSequence, Generation,
+    ImageArtifact, ImageKind, ImportImageMutation, InstanceId, InstanceLifecycleMutation,
+    LoadInstanceMutation, Operation, OperationId, OperationKind, ResourceKind,
+    ResourcePoolMutation, ResourceReference, Response, StopInstanceMutation,
     UpdateInstanceMutation,
 };
 
 use crate::{
     console::{CONSOLE_UPGRADE_PROTOCOL, ConsoleProxy, MkttyDeviceFactory, serve_framed_console},
+    image_store::{
+        ArtifactId, ArtifactKind, ArtifactRecord, ImageCatalog, ImageCatalogError, ImageStore,
+        ImageStoreError,
+    },
     inventory::{InventoryService, ProcessInventorySource},
     lifecycle::{
         CreateRequest, InstanceRequest, LifecycleRequest, LoadRequest, StopRequest, UpdateRequest,
@@ -118,6 +123,8 @@ impl ImagePolicy {
 #[derive(Clone, Debug)]
 pub struct RunningHostApiConfig {
     pub image_roots: Vec<PathBuf>,
+    pub image_store_root: PathBuf,
+    pub max_image_bytes: u64,
     pub service_limits: ServiceLimits,
     pub probe_deadline: Duration,
     pub kerf_deadline: Duration,
@@ -135,6 +142,8 @@ impl RunningHostApiConfig {
                 PathBuf::from("/boot"),
                 PathBuf::from("/var/lib/kernmux/images"),
             ],
+            image_store_root: PathBuf::from("/var/lib/kernmux/images/store"),
+            max_image_bytes: 4 * 1024 * 1024 * 1024,
             service_limits: ServiceLimits {
                 connections: 64,
                 mutations: 4,
@@ -158,6 +167,7 @@ pub struct HostApi<I, LR, LS, PR, PS> {
     scheduler: OperationScheduler,
     limiter: ServiceLimiter,
     image_policy: ImagePolicy,
+    image_catalog: Arc<Mutex<ImageCatalog>>,
     console: ConsoleProxy<MkttyDeviceFactory>,
 }
 
@@ -168,33 +178,38 @@ impl<I, LR, LS, PR, PS> std::fmt::Debug for HostApi<I, LR, LS, PR, PS> {
             .field("registry", &self.registry)
             .field("scheduler", &self.scheduler)
             .field("image_policy", &self.image_policy)
+            .field("image_catalog", &self.image_catalog)
             .finish_non_exhaustive()
     }
 }
 
 impl<I, LR, LS, PR, PS> HostApi<I, LR, LS, PR, PS> {
-    /// Assembles the dispatcher from replaceable backend components.
-    #[must_use]
-    pub fn new(
+    fn new(
         inventory: I,
         lifecycle: LifecycleExecutor<LR, LS>,
         resource_pool: ResourcePoolExecutor<PR, PS>,
-        registry: OperationRegistry,
-        scheduler: OperationScheduler,
-        limiter: ServiceLimiter,
-        image_policy: ImagePolicy,
+        infrastructure: HostApiInfrastructure,
     ) -> Self {
         Self {
             inventory: Mutex::new(inventory),
             lifecycle: Arc::new(Mutex::new(lifecycle)),
             resource_pool: Arc::new(Mutex::new(resource_pool)),
-            registry,
-            scheduler,
-            limiter,
-            image_policy,
+            registry: infrastructure.registry,
+            scheduler: infrastructure.scheduler,
+            limiter: infrastructure.limiter,
+            image_policy: infrastructure.image_policy,
+            image_catalog: Arc::new(Mutex::new(infrastructure.image_catalog)),
             console: ConsoleProxy::new(MkttyDeviceFactory::running_host()),
         }
     }
+}
+
+struct HostApiInfrastructure {
+    registry: OperationRegistry,
+    scheduler: OperationScheduler,
+    limiter: ServiceLimiter,
+    image_policy: ImagePolicy,
+    image_catalog: ImageCatalog,
 }
 
 /// Running-host dispatcher type used by `kernmuxd`.
@@ -232,15 +247,20 @@ impl RunningHostApi {
         );
         let image_policy =
             ImagePolicy::new(config.image_roots).map_err(HostApiBuildError::Configuration)?;
+        let image_store = ImageStore::new(config.image_store_root, config.max_image_bytes)
+            .map_err(HostApiBuildError::ImageStore)?;
         Ok((
             Self::new(
                 inventory,
                 lifecycle,
                 resource_pool,
-                registry,
-                scheduler,
-                limiter.clone(),
-                image_policy,
+                HostApiInfrastructure {
+                    registry,
+                    scheduler,
+                    limiter: limiter.clone(),
+                    image_policy,
+                    image_catalog: ImageCatalog::new(image_store),
+                },
             ),
             limiter,
         ))
@@ -337,6 +357,7 @@ where
             (&Method::GET, "/1.0") => self.snapshot(),
             (&Method::GET, "/1.0/resource-pool") => self.resource_pool(),
             (&Method::GET, "/1.0/instances") => self.instances(),
+            (&Method::GET, "/1.0/images") => self.images(),
             (&Method::GET, "/1.0/operations") => self.operations(),
             (&Method::GET, "/1.0/events") => self.events(request.uri.query()),
             (&Method::PUT, "/1.0/resource-pool") => {
@@ -360,6 +381,10 @@ where
                     audit_id.as_deref(),
                 )
             }
+            (&Method::POST, "/1.0/images") => {
+                let mutation = decode::<ImportImageMutation>(&request.body)?;
+                self.submit_image_import(mutation, peer, audit_id.as_deref())
+            }
             _ => self.dispatch_resource(request, peer),
         }
     }
@@ -374,6 +399,12 @@ where
             return match request.method {
                 Method::GET => self.operation(&operation_id),
                 Method::DELETE => self.cancel(&operation_id),
+                _ => Err(not_found()),
+            };
+        }
+        if let Some((kind, id)) = image_resource(request.uri.path()) {
+            return match request.method {
+                Method::GET => self.image(kind, &id),
                 _ => Err(not_found()),
             };
         }
@@ -539,6 +570,38 @@ where
         result_response(snapshot.generation, snapshot.resource_pool)
     }
 
+    fn images(&self) -> Result<LocalResponse, ApiError> {
+        let snapshot = self
+            .image_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refresh()
+            .map_err(image_catalog_api_error)?;
+        result_response(
+            snapshot.generation,
+            snapshot
+                .artifacts
+                .iter()
+                .map(image_artifact)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    fn image(&self, kind: ArtifactKind, id: &ArtifactId) -> Result<LocalResponse, ApiError> {
+        let snapshot = self
+            .image_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refresh()
+            .map_err(image_catalog_api_error)?;
+        let artifact = snapshot
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == kind && &artifact.id == id)
+            .ok_or_else(not_found)?;
+        result_response(snapshot.generation, image_artifact(artifact))
+    }
+
     fn operations(&self) -> Result<LocalResponse, ApiError> {
         result_response(
             self.registry.latest_generation(),
@@ -651,6 +714,67 @@ where
             .map_err(schedule_error)?;
         accepted_response(operation)
     }
+
+    fn submit_image_import(
+        &self,
+        mutation: ImportImageMutation,
+        peer: &PeerIdentity,
+        audit_id: Option<&str>,
+    ) -> Result<LocalResponse, ApiError> {
+        let kind = artifact_kind(mutation.kind)?;
+        let source = self.image_policy.resolve(&mutation.source_path)?;
+        let expected_id = mutation
+            .expected_id
+            .map(ArtifactId::parse)
+            .transpose()
+            .map_err(|error| image_store_api_error(&error))?;
+        let permit = self.limiter.acquire(LimitKind::Mutation)?;
+        let catalog = Arc::clone(&self.image_catalog);
+        let expected_generation = mutation.expected_generation;
+        let resource_id = expected_id
+            .as_ref()
+            .map_or_else(|| "catalog".into(), ToString::to_string);
+        let operation = self
+            .scheduler
+            .submit(
+                new_operation(
+                    OperationKind::ImportImage,
+                    expected_generation,
+                    ResourceReference {
+                        kind: ResourceKind::Image,
+                        id: resource_id,
+                    },
+                    peer,
+                    audit_id,
+                ),
+                move |cancellation| {
+                    let _permit = permit;
+                    if cancellation.is_cancelled() {
+                        return OperationTaskResult::cancelled(None);
+                    }
+                    let mut catalog = catalog
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if cancellation.is_cancelled() {
+                        return OperationTaskResult::cancelled(None);
+                    }
+                    match catalog.import_path(
+                        expected_generation,
+                        kind,
+                        source,
+                        expected_id.as_ref(),
+                    ) {
+                        Ok((_, snapshot)) => OperationTaskResult::succeeded(snapshot.generation),
+                        Err(error) => {
+                            let (api_error, generation) = image_catalog_task_error(error);
+                            OperationTaskResult::failed(api_error, generation)
+                        }
+                    }
+                },
+            )
+            .map_err(schedule_error)?;
+        accepted_response(operation)
+    }
 }
 
 fn run_lifecycle<R, S>(
@@ -686,8 +810,13 @@ fn route_for(method: &Method, path: &str) -> Option<RouteSecurity> {
     match (method, path) {
         (
             &Method::GET,
-            "/1.0" | "/1.0/resource-pool" | "/1.0/instances" | "/1.0/operations" | "/1.0/events",
+            "/1.0" | "/1.0/resource-pool" | "/1.0/instances" | "/1.0/images" | "/1.0/operations"
+            | "/1.0/events",
         ) => Some(read),
+        (&Method::POST, "/1.0/images") => Some(RouteSecurity {
+            class: RequestClass::Administration,
+            audit_action: AuditAction::ManageImages,
+        }),
         (&Method::PUT, "/1.0/resource-pool") => Some(RouteSecurity {
             class: RequestClass::Mutation,
             audit_action: AuditAction::MutateResourcePool,
@@ -699,6 +828,10 @@ fn route_for(method: &Method, path: &str) -> Option<RouteSecurity> {
                 class: RequestClass::Mutation,
                 audit_action: AuditAction::CancelOperation,
             }),
+            _ => None,
+        },
+        _ if image_resource(path).is_some() => match *method {
+            Method::GET => Some(read),
             _ => None,
         },
         _ => {
@@ -719,6 +852,85 @@ fn route_for(method: &Method, path: &str) -> Option<RouteSecurity> {
                 _ => None,
             }
         }
+    }
+}
+
+fn image_resource(path: &str) -> Option<(ArtifactKind, ArtifactId)> {
+    let suffix = path.strip_prefix("/1.0/images/")?;
+    let mut segments = suffix.split('/');
+    let kind = match segments.next()? {
+        "kernel" => ArtifactKind::Kernel,
+        "initrd" => ArtifactKind::Initrd,
+        _ => return None,
+    };
+    let id = ArtifactId::parse(segments.next()?.to_owned()).ok()?;
+    if segments.next().is_some() {
+        return None;
+    }
+    Some((kind, id))
+}
+
+fn artifact_kind(kind: ImageKind) -> Result<ArtifactKind, ApiError> {
+    match kind {
+        ImageKind::Kernel => Ok(ArtifactKind::Kernel),
+        ImageKind::Initrd => Ok(ArtifactKind::Initrd),
+        ImageKind::Unknown => Err(invalid("image kind is not supported")),
+    }
+}
+
+fn image_artifact(record: &ArtifactRecord) -> ImageArtifact {
+    ImageArtifact {
+        schema_version: record.schema_version,
+        kind: match record.kind {
+            ArtifactKind::Kernel => ImageKind::Kernel,
+            ArtifactKind::Initrd => ImageKind::Initrd,
+        },
+        id: record.id.to_string(),
+        bytes: record.bytes,
+    }
+}
+
+fn image_catalog_api_error(error: ImageCatalogError) -> ApiError {
+    image_catalog_task_error(error).0
+}
+
+fn image_catalog_task_error(catalog_error: ImageCatalogError) -> (ApiError, Option<Generation>) {
+    match catalog_error {
+        ImageCatalogError::StaleGeneration { actual, .. } => {
+            let mut error = error(
+                ErrorCode::PreconditionFailed,
+                "image catalog generation has changed",
+                false,
+            );
+            error.current_generation = Some(actual);
+            (error, Some(actual))
+        }
+        ImageCatalogError::GenerationExhausted => (
+            error(
+                ErrorCode::BackendUnavailable,
+                "image catalog generation is unavailable",
+                false,
+            ),
+            None,
+        ),
+        ImageCatalogError::Store(error) => (image_store_api_error(&error), None),
+    }
+}
+
+fn image_store_api_error(error: &ImageStoreError) -> ApiError {
+    match error {
+        ImageStoreError::InvalidSizeLimit
+        | ImageStoreError::InvalidArtifactId(_)
+        | ImageStoreError::SourceNotRegular
+        | ImageStoreError::EmptyArtifact
+        | ImageStoreError::TooLarge { .. }
+        | ImageStoreError::DigestMismatch { .. } => {
+            invalid("image artifact is invalid or exceeds policy")
+        }
+        ImageStoreError::NotFound => not_found(),
+        ImageStoreError::Corrupt(_)
+        | ImageStoreError::MetadataEncoding(_)
+        | ImageStoreError::Io { .. } => backend("image catalog is unavailable"),
     }
 }
 
@@ -866,6 +1078,7 @@ fn schedule_error(_error: ScheduleError) -> ApiError {
 pub enum HostApiBuildError {
     Configuration(ApiError),
     Registry(OperationRegistryError),
+    ImageStore(ImageStoreError),
     CurrentExecutable(std::io::Error),
 }
 
@@ -874,6 +1087,7 @@ impl std::fmt::Display for HostApiBuildError {
         match self {
             Self::Configuration(error) => error.message.fmt(formatter),
             Self::Registry(_) => formatter.write_str("operation registry configuration is invalid"),
+            Self::ImageStore(error) => write!(formatter, "image store is unavailable: {error}"),
             Self::CurrentExecutable(error) => {
                 write!(formatter, "failed to resolve service executable: {error}")
             }
@@ -881,7 +1095,15 @@ impl std::fmt::Display for HostApiBuildError {
     }
 }
 
-impl std::error::Error for HostApiBuildError {}
+impl std::error::Error for HostApiBuildError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::ImageStore(error) => Some(error),
+            Self::CurrentExecutable(error) => Some(error),
+            Self::Configuration(_) | Self::Registry(_) => None,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -917,9 +1139,35 @@ mod tests {
             route_for(&Method::GET, "/1.0/resource-pool").unwrap().class,
             RequestClass::ReadOnly
         );
+        assert_eq!(
+            route_for(&Method::POST, "/1.0/images").unwrap().class,
+            RequestClass::Administration
+        );
+        let id = format!("sha256:{}", "a".repeat(64));
+        assert_eq!(
+            route_for(&Method::GET, &format!("/1.0/images/kernel/{id}"))
+                .unwrap()
+                .class,
+            RequestClass::ReadOnly
+        );
+        assert!(route_for(&Method::GET, "/1.0/images/kernel/not-a-digest").is_none());
         assert!(route_for(&Method::POST, "/1.0/instances/1/unknown").is_none());
         assert!(route_for(&Method::GET, "/2.0").is_none());
         assert!(route_for(&Method::POST, "/1.0/instances/1/start/extra").is_none());
+    }
+
+    #[test]
+    fn image_resources_require_kind_and_canonical_digest() {
+        let id = format!("sha256:{}", "0".repeat(64));
+        assert_eq!(
+            image_resource(&format!("/1.0/images/initrd/{id}"))
+                .unwrap()
+                .0,
+            ArtifactKind::Initrd
+        );
+        assert!(image_resource(&format!("/1.0/images/unknown/{id}")).is_none());
+        assert!(image_resource(&format!("/1.0/images/kernel/{id}/extra")).is_none());
+        assert!(image_resource("/1.0/images/kernel/sha256:ABC").is_none());
     }
 
     #[test]

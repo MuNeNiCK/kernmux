@@ -11,8 +11,9 @@ use std::{
 };
 
 use kernmux_api::v1::{
-    CreateInstanceMutation, Generation, InstanceId, InstanceLifecycleMutation,
-    LoadInstanceMutation, ResourcePoolMutation, StopInstanceMutation, UpdateInstanceMutation,
+    CreateInstanceMutation, Generation, ImageKind, ImportImageMutation, InstanceId,
+    InstanceLifecycleMutation, LoadInstanceMutation, ResourcePoolMutation, StopInstanceMutation,
+    UpdateInstanceMutation,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -216,9 +217,69 @@ fn parse_command(args: &[String]) -> Result<ApiRequest, CliError> {
         "host" => parse_host(tail),
         "pool" => parse_pool(tail),
         "instance" => parse_instance(tail),
+        "image" => parse_image(tail),
         "operation" => parse_operation(tail),
         "events" => parse_events(tail),
         _ => Err(CliError::usage(format!("unknown resource {resource}"))),
+    }
+}
+
+fn parse_image(args: &[String]) -> Result<ApiRequest, CliError> {
+    let Some((action, tail)) = args.split_first() else {
+        return Err(CliError::usage("image action is required"));
+    };
+    match action.as_str() {
+        "list" if tail.is_empty() => Ok(get("/1.0/images")),
+        "show" => {
+            if tail.len() != 2 {
+                return Err(CliError::usage("image show requires KIND and ID"));
+            }
+            let (_, kind_path) = image_kind(&tail[0])?;
+            let id = artifact_id(&tail[1])?;
+            Ok(get(&format!("/1.0/images/{kind_path}/{id}")))
+        }
+        "import" => {
+            let options =
+                Options::parse(tail, &["generation", "kind", "source", "expected-id"], &[])?;
+            options.no_positionals()?;
+            let (kind, _) = image_kind(options.required("kind")?)?;
+            let expected_id = options.value("expected-id").map(artifact_id).transpose()?;
+            json_request(
+                "POST",
+                "/1.0/images",
+                &ImportImageMutation {
+                    expected_generation: generation(options.required("generation")?)?,
+                    kind,
+                    source_path: options.required("source")?.to_owned(),
+                    expected_id: expected_id.map(str::to_owned),
+                },
+            )
+        }
+        _ => Err(CliError::usage("unknown image action")),
+    }
+}
+
+fn image_kind(value: &str) -> Result<(ImageKind, &'static str), CliError> {
+    match value {
+        "kernel" => Ok((ImageKind::Kernel, "kernel")),
+        "initrd" => Ok((ImageKind::Initrd, "initrd")),
+        _ => Err(CliError::usage("image kind must be kernel or initrd")),
+    }
+}
+
+fn artifact_id(value: &str) -> Result<&str, CliError> {
+    let valid = value.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    });
+    if valid {
+        Ok(value)
+    } else {
+        Err(CliError::usage(
+            "image ID must be canonical sha256:<64 lowercase hex digits>",
+        ))
     }
 }
 
@@ -841,6 +902,9 @@ Resources:
   instance stop ID --generation N [--force]
   instance unload ID --generation N
   instance delete ID --generation N
+  image list
+  image show KIND ID
+  image import --generation N --kind KIND --source PATH [--expected-id ID]
   operation list
   operation show ID
   operation cancel ID
@@ -944,6 +1008,46 @@ mod tests {
             serde_json::json!(["0000:06:00.0", "0000:07:00.0"])
         );
         assert_eq!(body["dry_run"], true);
+    }
+
+    #[test]
+    fn parses_image_catalog_commands_with_canonical_ids() {
+        let id = format!("sha256:{}", "a".repeat(64));
+        let show = parse_invocation(&strings(&["image", "show", "kernel", &id])).unwrap();
+        assert_eq!(show.request.path, format!("/1.0/images/kernel/{id}"));
+
+        let import = parse_invocation(&strings(&[
+            "image",
+            "import",
+            "--generation",
+            "2",
+            "--kind",
+            "initrd",
+            "--source",
+            "/boot/initrd",
+            "--expected-id",
+            &id,
+        ]))
+        .unwrap();
+        let body: Value = serde_json::from_slice(&import.request.body).unwrap();
+        assert_eq!(body["expected_generation"], 2);
+        assert_eq!(body["kind"], "initrd");
+        assert_eq!(body["expected_id"], id);
+
+        assert!(parse_invocation(&strings(&["image", "show", "kernel", "sha256:ABC"])).is_err());
+        assert!(
+            parse_invocation(&strings(&[
+                "image",
+                "import",
+                "--generation",
+                "1",
+                "--kind",
+                "disk",
+                "--source",
+                "/tmp/disk"
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
