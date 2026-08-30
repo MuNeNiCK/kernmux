@@ -806,12 +806,32 @@ Usage: kernmuxctl [--socket PATH] [--pretty] [--request-id ID] RESOURCE ACTION [
 
 Resources:
   host show
-  pool show|set|release
-  instance list|show|create|update|load|start|stop|unload|delete
-  operation list|show|cancel
+  pool show
+  pool set --generation N --cpus LIST --memory SIZE
+  pool release --generation N
+  instance list
+  instance show ID
+  instance create --generation N --id ID --name NAME --cpus LIST --memory SIZE
+  instance update ID --generation N [--cpus LIST] [--memory SIZE] [--dry-run]
+  instance load ID --generation N --kernel PATH [--initrd PATH] [--cmdline TEXT]
+  instance start ID --generation N
+  instance stop ID --generation N [--force]
+  instance unload ID --generation N
+  instance delete ID --generation N
+  operation list
+  operation show ID
+  operation cancel ID
   events [--after SEQUENCE]
 
 All mutations require --generation. Memory accepts bytes, KiB, MiB, GiB, or TiB.
+
+Exit status:
+  0 success                 2 invalid command
+  3 transport failure       4 protocol failure
+  5 request rejected        6 authorization failure
+  7 service failure
+
+API error envelopes are written to stdout unchanged. Local errors are written to stderr.
 Default socket: {DEFAULT_SOCKET}"
     )
 }
