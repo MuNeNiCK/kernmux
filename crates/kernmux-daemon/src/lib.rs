@@ -2,6 +2,7 @@
 
 pub mod console;
 pub mod host_api;
+pub mod image_store;
 pub mod inventory;
 pub mod lifecycle;
 pub mod lifecycle_executor;
