@@ -271,9 +271,8 @@ name = "kernmux-cli"
 version = "0.1.0"
 dependencies = [
  "kernmux-api",
- "kernmux-core",
- "tracing",
- "tracing-subscriber",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
