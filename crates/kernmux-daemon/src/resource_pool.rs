@@ -492,6 +492,7 @@ mod tests {
             state: InstanceState::Ready,
             resources: ResourceAllocation {
                 cpu_hardware_ids: vec![4],
+                memory_base: None,
                 memory_bytes: 536_870_912,
                 memory_region: None,
                 device_ids: Vec::new(),

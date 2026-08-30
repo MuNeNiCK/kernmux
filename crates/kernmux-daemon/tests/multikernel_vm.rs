@@ -1,4 +1,4 @@
-use std::{env, ffi::OsString, path::PathBuf, time::Duration};
+use std::{convert::Infallible, env, ffi::OsString, path::PathBuf, time::Duration};
 
 use kernmux_api::v1::{InstanceId, OperationState};
 use kernmux_daemon::inventory::{
@@ -6,11 +6,12 @@ use kernmux_daemon::inventory::{
 };
 use kernmux_daemon::{
     lifecycle::{
-        CreateRequest, ExpectedState, InstanceRequest, KerfInvocation, LifecycleRequest,
-        LoadRequest, StopRequest, UpdateRequest,
+        CreateRequest, ExpectedState, InstanceRequest, KerfInvocation, LifecyclePlanError,
+        LifecycleRequest, LoadRequest, MemoryPlacementError, StopRequest, UpdateRequest,
     },
     lifecycle_executor::{
-        KerfRunner, KerfTermination, LifecycleExecutor, LifecycleOutcome, ProcessKerfRunner,
+        KerfRunner, KerfTermination, LifecycleExecutionError, LifecycleExecutor, LifecycleOutcome,
+        ProcessKerfRunner,
     },
 };
 
@@ -135,6 +136,70 @@ fn reconciles_complete_kerf_lifecycle() {
     let generation = executor.refresh_snapshot().unwrap().generation;
     assert_succeeded(executor.execute(&LifecycleRequest::Delete(request(generation))));
     assert!(executor.refresh_snapshot().unwrap().instances.is_empty());
+}
+
+#[test]
+#[ignore = "requires a prepared fragmented Multikernel memory pool VM"]
+fn rejects_peer_memory_overlap_before_running_kerf() {
+    struct NeverRunner;
+
+    impl KerfRunner for NeverRunner {
+        type Error = Infallible;
+
+        fn run(
+            &mut self,
+            _invocation: &KerfInvocation,
+        ) -> Result<kernmux_daemon::lifecycle_executor::KerfRunResult, Self::Error> {
+            panic!("memory overlap must be rejected before Kerf is run")
+        }
+    }
+
+    const GIB: u64 = 1 << 30;
+    let daemon = env::var_os("KERNMUXD_BINARY").expect("KERNMUXD_BINARY must identify kernmuxd");
+    let source = ProcessInventorySource::new(
+        daemon,
+        [OsString::from("--inventory-helper")],
+        Duration::from_secs(10),
+    );
+    let inventory = InventoryService::new(source);
+    let mut executor = LifecycleExecutor::new(NeverRunner, inventory);
+    let snapshot = executor.refresh_snapshot().unwrap();
+    let alpha = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.name == "alpha")
+        .expect("prepared VM must contain alpha");
+    let beta = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.name == "beta")
+        .expect("prepared VM must contain beta");
+    let alpha_base = alpha
+        .resources
+        .memory_base
+        .expect("alpha must expose its authoritative memory base");
+    assert_eq!(alpha.resources.memory_bytes, GIB + GIB / 2);
+    assert_eq!(beta.resources.memory_base, Some(alpha_base + GIB + GIB / 2));
+    assert_eq!(beta.resources.memory_bytes, GIB / 2);
+
+    let outcome = executor.execute(&LifecycleRequest::Update(UpdateRequest {
+        instance: InstanceRequest {
+            expected_generation: snapshot.generation,
+            id: alpha.id,
+        },
+        cpu_hardware_ids: None,
+        memory_bytes: Some(2 * GIB),
+        dry_run: false,
+    }));
+
+    assert!(matches!(
+        outcome,
+        Err(LifecycleExecutionError::Plan(
+            LifecyclePlanError::MemoryPlacement(MemoryPlacementError::OverlapsInstance {
+                peer_name
+            })
+        )) if peer_name == "beta"
+    ));
 }
 
 fn request(expected_generation: kernmux_api::v1::Generation) -> InstanceRequest {

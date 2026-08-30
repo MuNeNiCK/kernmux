@@ -162,6 +162,8 @@ pub enum InstanceState {
 pub struct ResourceAllocation {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cpu_hardware_ids: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_base: Option<u64>,
     pub memory_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_region: Option<String>,
@@ -686,6 +688,7 @@ mod tests {
                 state: InstanceState::Ready,
                 resources: ResourceAllocation {
                     cpu_hardware_ids: vec![4],
+                    memory_base: Some(0x4_0000_a000),
                     memory_bytes: 1_073_741_824,
                     memory_region: Some("instance-memory-0".into()),
                     device_ids: Vec::new(),
@@ -728,6 +731,16 @@ mod tests {
         )
         .expect("unknown fields must be tolerated");
         assert_eq!(state.state, InstanceState::Ready);
+    }
+
+    #[test]
+    fn resource_allocation_accepts_payload_without_memory_base() {
+        let allocation: ResourceAllocation = serde_json::from_value(serde_json::json!({
+            "memory_bytes": 1_073_741_824
+        }))
+        .unwrap();
+
+        assert_eq!(allocation.memory_base, None);
     }
 
     #[test]

@@ -503,7 +503,7 @@ mod tests {
 
     use kernmux_api::v1::{
         CpuTopology, Generation, HostMemory, Instance, InstanceId, InstanceState, KernelImage,
-        KernelInfo, ResourceAllocation, ResourcePool,
+        KernelInfo, MemoryRegion, ResourceAllocation, ResourcePool,
     };
 
     use super::*;
@@ -553,15 +553,19 @@ mod tests {
                 numa_nodes: Vec::new(),
             },
             memory: HostMemory {
-                total_bytes: 0,
+                total_bytes: 3_221_225_472,
                 host_reserved_bytes: 0,
-                assignable_bytes: 0,
-                assigned_bytes: 0,
+                assignable_bytes: 3_221_225_472,
+                assigned_bytes: u64::from(state.is_some()) * 1_073_741_824,
             },
             resource_pool: ResourcePool {
                 cpu_hardware_ids: vec![4, 5, 6],
                 available_cpu_hardware_ids: vec![4, 5, 6],
-                memory_regions: Vec::new(),
+                memory_regions: vec![MemoryRegion {
+                    base: 0x1_0000_0000,
+                    bytes: 3_221_225_472,
+                    numa_node: 0,
+                }],
             },
             instances: state
                 .map(|state| Instance {
@@ -569,7 +573,11 @@ mod tests {
                     name: "lab".into(),
                     generation: Generation(generation),
                     state,
-                    resources: ResourceAllocation::default(),
+                    resources: ResourceAllocation {
+                        memory_base: Some(0x1_0000_b000),
+                        memory_bytes: 1_073_741_824,
+                        ..ResourceAllocation::default()
+                    },
                     image: KernelImage::default(),
                 })
                 .into_iter()

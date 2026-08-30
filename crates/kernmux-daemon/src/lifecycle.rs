@@ -2,7 +2,7 @@
 
 use std::{collections::BTreeSet, ffi::OsString, fmt, path::PathBuf};
 
-use kernmux_api::v1::{ErrorCode, Generation, HostSnapshot, InstanceId, InstanceState};
+use kernmux_api::v1::{ErrorCode, Generation, HostSnapshot, Instance, InstanceId, InstanceState};
 
 use crate::placement::{CpuPlacementError, validate_instance_cpus};
 
@@ -162,6 +162,8 @@ fn plan_create(
     {
         return Err(LifecyclePlanError::AlreadyExists);
     }
+    validate_create_memory(snapshot, request.memory_bytes)
+        .map_err(LifecyclePlanError::MemoryPlacement)?;
 
     Ok(KerfInvocation {
         arguments: vec![
@@ -206,6 +208,8 @@ fn plan_update(
                 "memory allocation must be greater than zero",
             ));
         }
+        validate_update_memory(snapshot, instance, memory)
+            .map_err(LifecyclePlanError::MemoryPlacement)?;
         arguments.push(option("--memory=", memory));
     }
     if request.dry_run {
@@ -354,6 +358,161 @@ fn validate_cpus(cpus: &[u32]) -> Result<(), LifecyclePlanError> {
     Ok(())
 }
 
+fn validate_create_memory(
+    snapshot: &HostSnapshot,
+    requested_bytes: u64,
+) -> Result<(), MemoryPlacementError> {
+    let pool_bytes = checked_sum(
+        snapshot
+            .resource_pool
+            .memory_regions
+            .iter()
+            .map(|region| region.bytes),
+    )?;
+    let assigned_bytes = checked_sum(
+        snapshot
+            .instances
+            .iter()
+            .map(|instance| instance.resources.memory_bytes),
+    )?;
+    let available_bytes = pool_bytes.saturating_sub(assigned_bytes);
+    if requested_bytes > available_bytes {
+        return Err(MemoryPlacementError::InsufficientAvailable {
+            requested_bytes,
+            available_bytes,
+        });
+    }
+    if !snapshot
+        .resource_pool
+        .memory_regions
+        .iter()
+        .any(|region| region.bytes >= requested_bytes)
+    {
+        return Err(MemoryPlacementError::NoContiguousPoolChunk { requested_bytes });
+    }
+    Ok(())
+}
+
+fn validate_update_memory(
+    snapshot: &HostSnapshot,
+    instance: &Instance,
+    requested_bytes: u64,
+) -> Result<(), MemoryPlacementError> {
+    if requested_bytes <= instance.resources.memory_bytes {
+        return Ok(());
+    }
+    let base = instance
+        .resources
+        .memory_base
+        .ok_or(MemoryPlacementError::MissingInstanceBase { id: instance.id })?;
+    let requested_end = base
+        .checked_add(requested_bytes)
+        .ok_or(MemoryPlacementError::AddressOverflow)?;
+    let remains_in_chunk = snapshot.resource_pool.memory_regions.iter().any(|region| {
+        region
+            .base
+            .checked_add(region.bytes)
+            .is_some_and(|chunk_end| region.base <= base && requested_end <= chunk_end)
+    });
+    if !remains_in_chunk {
+        return Err(MemoryPlacementError::LeavesPoolChunk {
+            base,
+            requested_bytes,
+        });
+    }
+    for peer in snapshot
+        .instances
+        .iter()
+        .filter(|peer| peer.id != instance.id)
+    {
+        let Some(peer_base) = peer.resources.memory_base else {
+            if peer.resources.memory_bytes == 0 {
+                continue;
+            }
+            return Err(MemoryPlacementError::MissingInstanceBase { id: peer.id });
+        };
+        let peer_end = peer_base
+            .checked_add(peer.resources.memory_bytes)
+            .ok_or(MemoryPlacementError::AddressOverflow)?;
+        if base < peer_end && peer_base < requested_end {
+            return Err(MemoryPlacementError::OverlapsInstance {
+                peer_name: peer.name.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn checked_sum(mut values: impl Iterator<Item = u64>) -> Result<u64, MemoryPlacementError> {
+    values.try_fold(0_u64, |total, value| {
+        total
+            .checked_add(value)
+            .ok_or(MemoryPlacementError::AddressOverflow)
+    })
+}
+
+/// A memory request that cannot be placed safely in authoritative pool state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MemoryPlacementError {
+    InsufficientAvailable {
+        requested_bytes: u64,
+        available_bytes: u64,
+    },
+    NoContiguousPoolChunk {
+        requested_bytes: u64,
+    },
+    MissingInstanceBase {
+        id: InstanceId,
+    },
+    LeavesPoolChunk {
+        base: u64,
+        requested_bytes: u64,
+    },
+    OverlapsInstance {
+        peer_name: String,
+    },
+    AddressOverflow,
+}
+
+impl fmt::Display for MemoryPlacementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InsufficientAvailable {
+                requested_bytes,
+                available_bytes,
+            } => write!(
+                formatter,
+                "requested {requested_bytes} bytes, but only {available_bytes} pool bytes are unassigned"
+            ),
+            Self::NoContiguousPoolChunk { requested_bytes } => write!(
+                formatter,
+                "requested {requested_bytes} bytes do not fit in one contiguous pool chunk"
+            ),
+            Self::MissingInstanceBase { id } => write!(
+                formatter,
+                "instance {} has no authoritative memory base; refresh inventory before growing it",
+                id.0
+            ),
+            Self::LeavesPoolChunk {
+                base,
+                requested_bytes,
+            } => write!(
+                formatter,
+                "memory range at {base:#x} with {requested_bytes} bytes leaves its current pool chunk"
+            ),
+            Self::OverlapsInstance { peer_name } => write!(
+                formatter,
+                "requested memory range overlaps instance '{peer_name}'"
+            ),
+            Self::AddressOverflow => {
+                formatter.write_str("memory placement address or capacity overflows u64")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MemoryPlacementError {}
+
 fn cpu_list(cpus: &[u32]) -> String {
     cpus.iter()
         .map(u32::to_string)
@@ -384,6 +543,7 @@ pub enum LifecyclePlanError {
     },
     InvalidRequest(&'static str),
     CpuPlacement(CpuPlacementError),
+    MemoryPlacement(MemoryPlacementError),
     NotFound,
     AlreadyExists,
     InvalidState {
@@ -400,9 +560,10 @@ impl LifecyclePlanError {
             Self::StaleGeneration { .. } => ErrorCode::PreconditionFailed,
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::NotFound => ErrorCode::NotFound,
-            Self::CpuPlacement(_) | Self::AlreadyExists | Self::InvalidState { .. } => {
-                ErrorCode::Conflict
-            }
+            Self::CpuPlacement(_)
+            | Self::MemoryPlacement(_)
+            | Self::AlreadyExists
+            | Self::InvalidState { .. } => ErrorCode::Conflict,
         }
     }
 }
@@ -417,6 +578,9 @@ impl fmt::Display for LifecyclePlanError {
             ),
             Self::InvalidRequest(message) => formatter.write_str(message),
             Self::CpuPlacement(error) => write!(formatter, "CPU placement was rejected: {error}"),
+            Self::MemoryPlacement(error) => {
+                write!(formatter, "memory placement was rejected: {error}")
+            }
             Self::NotFound => formatter.write_str("instance was not found"),
             Self::AlreadyExists => formatter.write_str("instance ID or name already exists"),
             Self::InvalidState { required, actual } => {
@@ -434,8 +598,8 @@ impl std::error::Error for LifecyclePlanError {}
 #[cfg(test)]
 mod tests {
     use kernmux_api::v1::{
-        CpuTopology, HostMemory, KernelImage, KernelInfo, ResourceAllocation, ResourcePool,
-        SnapshotHealth,
+        CpuTopology, HostMemory, KernelImage, KernelInfo, MemoryRegion, ResourceAllocation,
+        ResourcePool, SnapshotHealth,
     };
 
     use super::*;
@@ -456,15 +620,19 @@ mod tests {
                 numa_nodes: Vec::new(),
             },
             memory: HostMemory {
-                total_bytes: 0,
+                total_bytes: 3_221_225_472,
                 host_reserved_bytes: 0,
-                assignable_bytes: 0,
-                assigned_bytes: 0,
+                assignable_bytes: 3_221_225_472,
+                assigned_bytes: u64::from(state.is_some()) * 1_073_741_824,
             },
             resource_pool: ResourcePool {
                 cpu_hardware_ids: vec![4, 5, 6],
                 available_cpu_hardware_ids: vec![4, 5, 6],
-                memory_regions: Vec::new(),
+                memory_regions: vec![MemoryRegion {
+                    base: 0x1_0000_0000,
+                    bytes: 3_221_225_472,
+                    numa_node: 0,
+                }],
             },
             instances: state
                 .map(|state| kernmux_api::v1::Instance {
@@ -472,7 +640,11 @@ mod tests {
                     name: "lab".into(),
                     generation: Generation(7),
                     state,
-                    resources: ResourceAllocation::default(),
+                    resources: ResourceAllocation {
+                        memory_base: Some(0x1_0000_b000),
+                        memory_bytes: 1_073_741_824,
+                        ..ResourceAllocation::default()
+                    },
                     image: KernelImage {
                         present: matches!(state, InstanceState::Loaded | InstanceState::Active),
                     },
@@ -644,6 +816,165 @@ mod tests {
         assert!(matches!(
             plan(&wrong_state, &snapshot(Some(InstanceState::Active))),
             Err(LifecyclePlanError::InvalidState { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_growth_into_a_peer_instance() {
+        const GIB: u64 = 1 << 30;
+        let mut host = snapshot(Some(InstanceState::Ready));
+        let base = host.instances[0].resources.memory_base.unwrap();
+        host.instances[0].resources.memory_bytes = GIB + GIB / 2;
+        host.instances.push(kernmux_api::v1::Instance {
+            id: InstanceId(2),
+            name: "beta".into(),
+            generation: Generation(7),
+            state: InstanceState::Ready,
+            resources: ResourceAllocation {
+                memory_base: Some(base + GIB + GIB / 2),
+                memory_bytes: GIB / 2,
+                ..ResourceAllocation::default()
+            },
+            image: KernelImage::default(),
+        });
+
+        let error = plan(
+            &LifecycleRequest::Update(UpdateRequest {
+                instance: instance_request(),
+                cpu_hardware_ids: None,
+                memory_bytes: Some(2 * GIB),
+                dry_run: false,
+            }),
+            &host,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.error_code(), ErrorCode::Conflict);
+        assert!(matches!(
+            error,
+            LifecyclePlanError::MemoryPlacement(MemoryPlacementError::OverlapsInstance {
+                peer_name
+            }) if peer_name == "beta"
+        ));
+
+        host.instances[1].resources.memory_base = None;
+        assert!(matches!(
+            plan(
+                &LifecycleRequest::Update(UpdateRequest {
+                    instance: instance_request(),
+                    cpu_hardware_ids: None,
+                    memory_bytes: Some(2 * GIB),
+                    dry_run: false,
+                }),
+                &host,
+            ),
+            Err(LifecyclePlanError::MemoryPlacement(
+                MemoryPlacementError::MissingInstanceBase { id: InstanceId(2) }
+            ))
+        ));
+    }
+
+    #[test]
+    fn accepts_safe_memory_shrink_and_same_chunk_growth() {
+        const GIB: u64 = 1 << 30;
+        let host = snapshot(Some(InstanceState::Ready));
+
+        for requested in [GIB / 2, GIB + GIB / 2] {
+            let invocation = plan(
+                &LifecycleRequest::Update(UpdateRequest {
+                    instance: instance_request(),
+                    cpu_hardware_ids: None,
+                    memory_bytes: Some(requested),
+                    dry_run: true,
+                }),
+                &host,
+            )
+            .unwrap();
+            assert!(!invocation.mutates_kernel);
+        }
+    }
+
+    #[test]
+    fn rejects_growth_across_pool_chunks_and_address_overflow() {
+        const GIB: u64 = 1 << 30;
+        let mut host = snapshot(Some(InstanceState::Ready));
+        let base = host.instances[0].resources.memory_base.unwrap();
+        host.instances[0].resources.memory_bytes = GIB / 2;
+        host.resource_pool.memory_regions = vec![
+            MemoryRegion {
+                base: base - 0xb000,
+                bytes: GIB,
+                numa_node: 0,
+            },
+            MemoryRegion {
+                base: 0x4_0000_0000,
+                bytes: GIB,
+                numa_node: 1,
+            },
+        ];
+        let request = |memory_bytes| {
+            LifecycleRequest::Update(UpdateRequest {
+                instance: instance_request(),
+                cpu_hardware_ids: None,
+                memory_bytes: Some(memory_bytes),
+                dry_run: false,
+            })
+        };
+
+        assert!(matches!(
+            plan(&request(GIB + GIB / 2), &host),
+            Err(LifecyclePlanError::MemoryPlacement(
+                MemoryPlacementError::LeavesPoolChunk { .. }
+            ))
+        ));
+
+        host.instances[0].resources.memory_base = Some(u64::MAX - 8);
+        host.instances[0].resources.memory_bytes = 1;
+        assert!(matches!(
+            plan(&request(16), &host),
+            Err(LifecyclePlanError::MemoryPlacement(
+                MemoryPlacementError::AddressOverflow
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_unplaceable_create_memory() {
+        const GIB: u64 = 1 << 30;
+        let mut host = snapshot(None);
+        host.resource_pool.memory_regions = vec![
+            MemoryRegion {
+                base: 0x1_0000_0000,
+                bytes: GIB,
+                numa_node: 0,
+            },
+            MemoryRegion {
+                base: 0x4_0000_0000,
+                bytes: GIB,
+                numa_node: 1,
+            },
+        ];
+        let request = |memory_bytes| {
+            LifecycleRequest::Create(CreateRequest {
+                expected_generation: Generation(7),
+                id: InstanceId(2),
+                name: "beta".into(),
+                cpu_hardware_ids: vec![4],
+                memory_bytes,
+            })
+        };
+
+        assert!(matches!(
+            plan(&request(GIB + GIB / 2), &host),
+            Err(LifecyclePlanError::MemoryPlacement(
+                MemoryPlacementError::NoContiguousPoolChunk { .. }
+            ))
+        ));
+        assert!(matches!(
+            plan(&request(3 * GIB), &host),
+            Err(LifecyclePlanError::MemoryPlacement(
+                MemoryPlacementError::InsufficientAvailable { .. }
+            ))
         ));
     }
 }

@@ -541,6 +541,7 @@ fn map_instances(generation: Generation, observed: &MultikernelObservation) -> V
             state: map_instance_state(instance.state),
             resources: ResourceAllocation {
                 cpu_hardware_ids: instance.resources.cpu_hardware_ids.clone(),
+                memory_base: Some(instance.resources.memory_base),
                 memory_bytes: instance.resources.memory_bytes,
                 memory_region: None,
                 device_ids: Vec::new(),
@@ -777,6 +778,10 @@ mod tests {
         assert_eq!(changed.generation, Generation(2));
         assert_eq!(changed.instances[0].state, InstanceState::Loaded);
         assert!(changed.instances[0].image.present);
+        assert_eq!(
+            changed.instances[0].resources.memory_base,
+            Some(0x4_0000_a000)
+        );
         assert_eq!(changed.memory.assignable_bytes, 2_147_483_648);
         assert_eq!(changed.memory.assigned_bytes, 1_073_741_824);
         assert_eq!(changed.memory.total_bytes, 6_442_450_944);
