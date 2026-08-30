@@ -313,16 +313,18 @@ impl InventorySource for FilesystemInventorySource {
     type Error = FilesystemInventoryError;
 
     fn observe(&mut self) -> Result<HostObservations, Self::Error> {
-        Ok(HostObservations {
-            linux: self
-                .linux
+        let linux = self
+            .linux
+            .observe()
+            .map_err(FilesystemInventoryError::Linux)?;
+        let multikernel = if linux.capabilities.supports(HostCapability::Multikernel) {
+            self.multikernel
                 .observe()
-                .map_err(FilesystemInventoryError::Linux)?,
-            multikernel: self
-                .multikernel
-                .observe()
-                .map_err(FilesystemInventoryError::Multikernel)?,
-        })
+                .map_err(FilesystemInventoryError::Multikernel)?
+        } else {
+            MultikernelObservation::default()
+        };
+        Ok(HostObservations { linux, multikernel })
     }
 }
 
@@ -598,6 +600,8 @@ mod tests {
         collections::VecDeque,
         convert::Infallible,
         ffi::OsString,
+        fs,
+        path::Path,
         time::{Duration, Instant},
     };
 
@@ -611,11 +615,64 @@ mod tests {
             MemoryRegionObservation, ResourcePoolObservation,
         },
     };
+    use tempfile::TempDir;
 
     use super::*;
 
     struct SequenceSource {
         observations: VecDeque<HostObservations>,
+    }
+
+    fn write_fixture(root: &Path, relative: &str, contents: &str) {
+        let path = root.join(relative);
+        fs::create_dir_all(path.parent().expect("fixture path must have a parent"))
+            .expect("fixture directory must be created");
+        fs::write(path, contents).expect("fixture file must be written");
+    }
+
+    fn linux_only_fixture() -> TempDir {
+        let root = TempDir::new().expect("temporary root must be created");
+        write_fixture(root.path(), "proc/sys/kernel/osrelease", "6.18.0\n");
+        write_fixture(root.path(), "sys/devices/system/cpu/online", "0\n");
+        write_fixture(root.path(), "proc/cpuinfo", "processor: 0\napicid: 0\n");
+        write_fixture(
+            root.path(),
+            "sys/devices/system/cpu/cpu0/topology/physical_package_id",
+            "0\n",
+        );
+        write_fixture(
+            root.path(),
+            "sys/devices/system/cpu/cpu0/topology/core_id",
+            "0\n",
+        );
+        write_fixture(root.path(), "sys/devices/system/node/node0/cpulist", "0\n");
+        write_fixture(
+            root.path(),
+            "sys/devices/system/node/node0/meminfo",
+            "Node 0 MemTotal: 1024 kB\nNode 0 MemFree: 512 kB\n",
+        );
+        write_fixture(
+            root.path(),
+            "proc/meminfo",
+            "MemTotal: 1024 kB\nMemAvailable: 512 kB\n",
+        );
+        root
+    }
+
+    #[test]
+    fn reports_linux_without_multikernel_as_an_empty_healthy_host() {
+        let root = linux_only_fixture();
+        let source = FilesystemInventorySource::new(root.path());
+        let snapshot = InventoryService::new(source)
+            .refresh()
+            .expect("Linux-only host must be inventoried");
+
+        assert_eq!(snapshot.health, SnapshotHealth::Healthy);
+        assert!(!snapshot.kernel.multikernel_enabled);
+        assert!(snapshot.capabilities.is_empty());
+        assert!(snapshot.resource_pool.cpu_hardware_ids.is_empty());
+        assert!(snapshot.instances.is_empty());
+        assert!(snapshot.transactions.is_empty());
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]

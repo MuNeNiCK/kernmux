@@ -202,7 +202,7 @@ impl MultikernelProbe {
 }
 
 /// Normalized Multikernel observations.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MultikernelObservation {
     pub pool: ResourcePoolObservation,
     pub instances: Vec<InstanceObservation>,
