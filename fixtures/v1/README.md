@@ -20,3 +20,5 @@ treat `observed_state` as authoritative and command output as diagnostic data.
 In particular, the create fixture records a real case where Kerf exited with an
 error after the kernel mutation had succeeded.
 
+The device-tree directory includes source DTS files for review and their
+deterministically compiled DTB counterparts for parser tests.
