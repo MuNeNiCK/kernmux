@@ -17,6 +17,13 @@ test "$(systemctl show kernmuxd.service -P ConditionResult)" = no
 test "$(systemctl is-active kernmuxd.service)" = inactive
 test ! -e /run/kernmux/kernmuxd.sock
 kernmuxctl --version
+if diagnostic=$(kernmuxctl host diagnose); then
+    diagnostic_status=0
+else
+    diagnostic_status=$?
+fi
+test "$diagnostic_status" -eq 5
+printf '%s\n' "$diagnostic" | grep -F '"compatible":false' >/dev/null
 
 printf '%s\n' '# administrator-marker' >>/etc/kernmux/kernmuxd.env
 printf '%s\n' persistent >/var/lib/kernmux/state-sentinel
