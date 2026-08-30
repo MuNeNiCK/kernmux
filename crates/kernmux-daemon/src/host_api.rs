@@ -335,6 +335,8 @@ where
         let audit_id = request.request_id.clone();
         match (&request.method, path) {
             (&Method::GET, "/1.0") => self.snapshot(),
+            (&Method::GET, "/1.0/resource-pool") => self.resource_pool(),
+            (&Method::GET, "/1.0/instances") => self.instances(),
             (&Method::GET, "/1.0/operations") => self.operations(),
             (&Method::GET, "/1.0/events") => self.events(request.uri.query()),
             (&Method::PUT, "/1.0/resource-pool") => {
@@ -516,6 +518,26 @@ where
         result_response(snapshot.generation, instance)
     }
 
+    fn instances(&self) -> Result<LocalResponse, ApiError> {
+        let snapshot = self
+            .inventory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refresh_snapshot()
+            .map_err(|_| backend("host inventory is unavailable"))?;
+        result_response(snapshot.generation, snapshot.instances)
+    }
+
+    fn resource_pool(&self) -> Result<LocalResponse, ApiError> {
+        let snapshot = self
+            .inventory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refresh_snapshot()
+            .map_err(|_| backend("host inventory is unavailable"))?;
+        result_response(snapshot.generation, snapshot.resource_pool)
+    }
+
     fn operations(&self) -> Result<LocalResponse, ApiError> {
         result_response(
             self.registry.latest_generation(),
@@ -661,7 +683,10 @@ fn route_for(method: &Method, path: &str) -> Option<RouteSecurity> {
         audit_action: AuditAction::MutateLifecycle,
     };
     match (method, path) {
-        (&Method::GET, "/1.0" | "/1.0/operations" | "/1.0/events") => Some(read),
+        (
+            &Method::GET,
+            "/1.0" | "/1.0/resource-pool" | "/1.0/instances" | "/1.0/operations" | "/1.0/events",
+        ) => Some(read),
         (&Method::PUT, "/1.0/resource-pool") => Some(RouteSecurity {
             class: RequestClass::Mutation,
             audit_action: AuditAction::MutateResourcePool,
@@ -882,6 +907,14 @@ mod tests {
                 .unwrap()
                 .class,
             RequestClass::Console
+        );
+        assert_eq!(
+            route_for(&Method::GET, "/1.0/instances").unwrap().class,
+            RequestClass::ReadOnly
+        );
+        assert_eq!(
+            route_for(&Method::GET, "/1.0/resource-pool").unwrap().class,
+            RequestClass::ReadOnly
         );
         assert!(route_for(&Method::POST, "/1.0/instances/1/unknown").is_none());
         assert!(route_for(&Method::GET, "/2.0").is_none());
