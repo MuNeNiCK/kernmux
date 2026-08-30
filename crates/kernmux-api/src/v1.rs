@@ -114,7 +114,7 @@ pub struct HostMemory {
     pub assigned_bytes: u64,
 }
 
-/// CPU and memory resources delegated to peer kernels.
+/// Resources delegated to peer kernels.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourcePool {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -123,6 +123,25 @@ pub struct ResourcePool {
     pub available_cpu_hardware_ids: Vec<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub memory_regions: Vec<MemoryRegion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<PciDevice>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub available_device_ids: Vec<String>,
+}
+
+/// One PCI device delegated to the Multikernel resource hierarchy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PciDevice {
+    pub pci_id: String,
+    pub pool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iommu_group: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub iommu_group_members: Vec<String>,
 }
 
 /// One contiguous memory region delegated to the resource pool.
@@ -209,6 +228,8 @@ pub struct UpdateInstanceMutation {
     pub cpu_hardware_ids: Option<Vec<u32>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_ids: Option<Vec<String>>,
     #[serde(default)]
     pub dry_run: bool,
 }
@@ -599,6 +620,7 @@ mod tests {
             expected_generation: Generation(6),
             cpu_hardware_ids: Some(vec![4, 5]),
             memory_bytes: None,
+            device_ids: None,
             dry_run: false,
         });
         round_trip(&LoadInstanceMutation {
@@ -680,6 +702,8 @@ mod tests {
                     bytes: 2_147_483_648,
                     numa_node: 0,
                 }],
+                devices: Vec::new(),
+                available_device_ids: Vec::new(),
             },
             instances: vec![Instance {
                 id: InstanceId(1),

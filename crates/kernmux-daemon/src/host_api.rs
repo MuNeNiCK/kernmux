@@ -400,6 +400,7 @@ where
                         instance: instance_request(mutation.expected_generation, instance_id),
                         cpu_hardware_ids: mutation.cpu_hardware_ids,
                         memory_bytes: mutation.memory_bytes,
+                        device_ids: mutation.device_ids,
                         dry_run: mutation.dry_run,
                     }),
                     OperationKind::UpdateInstance,

@@ -1,6 +1,7 @@
 //! Authoritative host snapshot assembly.
 
 use std::{
+    collections::BTreeMap,
     ffi::OsString,
     fmt,
     fs::File,
@@ -14,7 +15,8 @@ use std::{
 use kernmux_api::v1::{
     Capability, Cpu, CpuTopology, Diagnostic, DiagnosticSeverity, Generation, HostMemory,
     HostSnapshot, Instance, InstanceId, InstanceState, KernelImage, KernelInfo, MemoryRegion,
-    NumaNode, ResourceAllocation, ResourcePool, SnapshotHealth, Transaction, TransactionState,
+    NumaNode, PciDevice, ResourceAllocation, ResourcePool, SnapshotHealth, Transaction,
+    TransactionState,
 };
 use kernmux_core::{
     host::{HostCapability, LinuxHostObservation, LinuxHostProbe, ProbeError},
@@ -514,6 +516,28 @@ fn map_topology(observed: &LinuxHostObservation) -> CpuTopology {
 }
 
 fn map_resource_pool(observed: &MultikernelObservation) -> ResourcePool {
+    let devices = observed
+        .pool
+        .devices
+        .iter()
+        .chain(
+            observed
+                .instances
+                .iter()
+                .flat_map(|instance| &instance.resources.devices),
+        )
+        .map(|device| (device.pci_id.clone(), device))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .map(|device| PciDevice {
+            pci_id: device.pci_id.clone(),
+            pool_name: device.pool_name.clone(),
+            vendor_id: device.vendor_id,
+            device_id: device.device_id,
+            iommu_group: device.iommu_group,
+            iommu_group_members: device.iommu_group_members.clone(),
+        })
+        .collect();
     ResourcePool {
         cpu_hardware_ids: observed.pool.cpu_hardware_ids.clone(),
         available_cpu_hardware_ids: observed.pool.available_cpu_hardware_ids.clone(),
@@ -526,6 +550,13 @@ fn map_resource_pool(observed: &MultikernelObservation) -> ResourcePool {
                 bytes: region.bytes,
                 numa_node: region.numa_node,
             })
+            .collect(),
+        devices,
+        available_device_ids: observed
+            .pool
+            .devices
+            .iter()
+            .map(|device| device.pci_id.clone())
             .collect(),
     }
 }
@@ -544,7 +575,12 @@ fn map_instances(generation: Generation, observed: &MultikernelObservation) -> V
                 memory_base: Some(instance.resources.memory_base),
                 memory_bytes: instance.resources.memory_bytes,
                 memory_region: None,
-                device_ids: Vec::new(),
+                device_ids: instance
+                    .resources
+                    .devices
+                    .iter()
+                    .map(|device| device.pci_id.clone())
+                    .collect(),
             },
             image: KernelImage {
                 present: instance.image.present,
@@ -575,6 +611,7 @@ const fn map_capability(capability: HostCapability) -> Capability {
         HostCapability::DynamicResources => Capability::DynamicResources,
         HostCapability::Console => Capability::Console,
         HostCapability::SharedMemory => Capability::SharedMemory,
+        HostCapability::DeviceAssignment => Capability::DeviceAssignment,
     }
 }
 
@@ -613,7 +650,7 @@ mod tests {
         },
         multikernel::{
             InstanceObservation, InstanceResourceObservation, KernelImageObservation,
-            MemoryRegionObservation, ResourcePoolObservation,
+            MemoryRegionObservation, PciDeviceObservation, ResourcePoolObservation,
         },
     };
     use tempfile::TempDir;
@@ -741,6 +778,14 @@ mod tests {
                         bytes: 2_147_483_648,
                         numa_node: 0,
                     }],
+                    devices: vec![PciDeviceObservation {
+                        pool_name: "pci_0000_05_00_0".into(),
+                        pci_id: "0000:05:00.0".into(),
+                        vendor_id: Some(0x1af4),
+                        device_id: Some(0x1044),
+                        iommu_group: Some(13),
+                        iommu_group_members: vec!["0000:05:00.0".into()],
+                    }],
                 },
                 instances: vec![InstanceObservation {
                     id: 1,
@@ -750,6 +795,14 @@ mod tests {
                         cpu_hardware_ids: vec![4],
                         memory_base: 0x4_0000_a000,
                         memory_bytes: 1_073_741_824,
+                        devices: vec![PciDeviceObservation {
+                            pool_name: "pci_0000_06_00_0".into(),
+                            pci_id: "0000:06:00.0".into(),
+                            vendor_id: Some(0x1af4),
+                            device_id: Some(0x1044),
+                            iommu_group: Some(14),
+                            iommu_group_members: vec!["0000:06:00.0".into()],
+                        }],
                     },
                     image: KernelImageObservation {
                         present: state != InstanceLifecycleState::Ready,
@@ -778,6 +831,9 @@ mod tests {
         assert_eq!(changed.generation, Generation(2));
         assert_eq!(changed.instances[0].state, InstanceState::Loaded);
         assert!(changed.instances[0].image.present);
+        assert_eq!(changed.resource_pool.devices.len(), 2);
+        assert_eq!(changed.resource_pool.available_device_ids, ["0000:05:00.0"]);
+        assert_eq!(changed.instances[0].resources.device_ids, ["0000:06:00.0"]);
         assert_eq!(
             changed.instances[0].resources.memory_base,
             Some(0x4_0000_a000)

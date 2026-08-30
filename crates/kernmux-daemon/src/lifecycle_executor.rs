@@ -412,6 +412,7 @@ fn expected_state_observed(expected: &ExpectedState, snapshot: &HostSnapshot) ->
             name,
             cpu_hardware_ids,
             memory_bytes,
+            device_ids,
         } => snapshot.instances.iter().any(|instance| {
             instance.id == *id
                 && instance.state == *state
@@ -431,6 +432,14 @@ fn expected_state_observed(expected: &ExpectedState, snapshot: &HostSnapshot) ->
                             .collect()
                 })
                 && memory_bytes.is_none_or(|expected| instance.resources.memory_bytes == expected)
+                && device_ids.as_ref().is_none_or(|expected| {
+                    expected.iter().collect::<std::collections::BTreeSet<_>>()
+                        == instance
+                            .resources
+                            .device_ids
+                            .iter()
+                            .collect::<std::collections::BTreeSet<_>>()
+                })
         }),
         ExpectedState::ResourcePool {
             cpu_hardware_ids,
@@ -566,6 +575,8 @@ mod tests {
                     bytes: 3_221_225_472,
                     numa_node: 0,
                 }],
+                devices: Vec::new(),
+                available_device_ids: Vec::new(),
             },
             instances: state
                 .map(|state| Instance {
@@ -676,6 +687,7 @@ mod tests {
             },
             cpu_hardware_ids: Some(vec![4, 5]),
             memory_bytes: Some(2048),
+            device_ids: None,
             dry_run: false,
         });
         let mut executor = LifecycleExecutor::new(runner, snapshots);

@@ -169,6 +169,8 @@ mod tests {
                 cpu_hardware_ids: vec![12],
                 available_cpu_hardware_ids: vec![12, 14],
                 memory_regions: Vec::new(),
+                devices: Vec::new(),
+                available_device_ids: Vec::new(),
             },
             instances: Vec::new(),
             transactions: Vec::new(),

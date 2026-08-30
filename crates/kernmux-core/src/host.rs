@@ -51,6 +51,7 @@ impl LinuxHostProbe {
     }
 
     fn capabilities(&self) -> HostCapabilities {
+        let multikernel = self.exists("sys/fs/multikernel/device_tree");
         let candidates = [
             (
                 HostCapability::Multikernel,
@@ -65,12 +66,24 @@ impl LinuxHostProbe {
             (HostCapability::Console, "dev/mktty"),
             (HostCapability::SharedMemory, "dev/dma_heap/multikernel"),
         ];
-        HostCapabilities {
-            supported: candidates
-                .into_iter()
-                .filter_map(|(capability, path)| self.exists(path).then_some(capability))
-                .collect(),
+        let mut supported: BTreeSet<_> = candidates
+            .into_iter()
+            .filter_map(|(capability, path)| self.exists(path).then_some(capability))
+            .collect();
+        if multikernel && self.has_nonempty_iommu_group() {
+            supported.insert(HostCapability::DeviceAssignment);
         }
+        HostCapabilities { supported }
+    }
+
+    fn has_nonempty_iommu_group(&self) -> bool {
+        let Ok(groups) = fs::read_dir(self.path("sys/kernel/iommu_groups")) else {
+            return false;
+        };
+        groups.flatten().any(|group| {
+            fs::read_dir(group.path().join("devices"))
+                .is_ok_and(|mut devices| devices.next().is_some())
+        })
     }
 
     fn read_cpus(
@@ -246,6 +259,7 @@ pub enum HostCapability {
     DynamicResources,
     Console,
     SharedMemory,
+    DeviceAssignment,
 }
 
 /// One online logical CPU.
@@ -448,6 +462,11 @@ mod tests {
             .expect("instances directory must be created");
         fs::create_dir_all(root.path().join("sys/fs/multikernel/overlays"))
             .expect("overlays directory must be created");
+        write(
+            root.path(),
+            "sys/kernel/iommu_groups/14/devices/0000:06:00.0",
+            "",
+        );
         root
     }
 
@@ -471,6 +490,7 @@ mod tests {
             HostCapability::DynamicResources,
             HostCapability::Console,
             HostCapability::SharedMemory,
+            HostCapability::DeviceAssignment,
         ] {
             assert!(observed.capabilities.supports(capability));
         }

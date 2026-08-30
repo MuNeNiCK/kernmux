@@ -419,6 +419,8 @@ mod tests {
                     })
                     .into_iter()
                     .collect(),
+                devices: Vec::new(),
+                available_device_ids: Vec::new(),
             },
             instances: Vec::new(),
             transactions: Vec::new(),

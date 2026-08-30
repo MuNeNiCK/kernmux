@@ -1,13 +1,14 @@
 use std::{convert::Infallible, env, ffi::OsString, path::PathBuf, time::Duration};
 
-use kernmux_api::v1::{InstanceId, OperationState};
+use kernmux_api::v1::{Capability, InstanceId, OperationState};
 use kernmux_daemon::inventory::{
     FilesystemInventorySource, InventoryService, ProcessInventorySource,
 };
 use kernmux_daemon::{
     lifecycle::{
-        CreateRequest, ExpectedState, InstanceRequest, KerfInvocation, LifecyclePlanError,
-        LifecycleRequest, LoadRequest, MemoryPlacementError, StopRequest, UpdateRequest,
+        CreateRequest, DevicePlacementError, ExpectedState, InstanceRequest, KerfInvocation,
+        LifecyclePlanError, LifecycleRequest, LoadRequest, MemoryPlacementError, StopRequest,
+        UpdateRequest,
     },
     lifecycle_executor::{
         KerfRunner, KerfTermination, LifecycleExecutionError, LifecycleExecutor, LifecycleOutcome,
@@ -110,6 +111,7 @@ fn reconciles_complete_kerf_lifecycle() {
         instance: request(generation),
         cpu_hardware_ids: Some(vec![4, 5, 6]),
         memory_bytes: None,
+        device_ids: None,
         dry_run: false,
     })));
 
@@ -189,6 +191,7 @@ fn rejects_peer_memory_overlap_before_running_kerf() {
         },
         cpu_hardware_ids: None,
         memory_bytes: Some(2 * GIB),
+        device_ids: None,
         dry_run: false,
     }));
 
@@ -200,6 +203,152 @@ fn rejects_peer_memory_overlap_before_running_kerf() {
             })
         )) if peer_name == "beta"
     ));
+}
+
+#[test]
+#[ignore = "requires a prepared Multikernel VM with an assigned PCI device"]
+fn rejects_peer_device_conflict_before_running_kerf() {
+    struct NeverRunner;
+
+    impl KerfRunner for NeverRunner {
+        type Error = Infallible;
+
+        fn run(
+            &mut self,
+            _invocation: &KerfInvocation,
+        ) -> Result<kernmux_daemon::lifecycle_executor::KerfRunResult, Self::Error> {
+            panic!("device ownership conflict must be rejected before Kerf is run")
+        }
+    }
+
+    const PCI_ID: &str = "0000:06:00.0";
+    let daemon = env::var_os("KERNMUXD_BINARY").expect("KERNMUXD_BINARY must identify kernmuxd");
+    let source = ProcessInventorySource::new(
+        daemon,
+        [OsString::from("--inventory-helper")],
+        Duration::from_secs(10),
+    );
+    let inventory = InventoryService::new(source);
+    let mut executor = LifecycleExecutor::new(NeverRunner, inventory);
+    let snapshot = executor.refresh_snapshot().unwrap();
+    let alpha = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.name == "alpha")
+        .expect("prepared VM must contain alpha");
+    let beta = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.name == "beta")
+        .expect("prepared VM must contain beta");
+    assert!(
+        snapshot
+            .capabilities
+            .contains(&Capability::DeviceAssignment)
+    );
+    let device = snapshot
+        .resource_pool
+        .devices
+        .iter()
+        .find(|device| device.pci_id == PCI_ID)
+        .expect("prepared VM must expose the managed PCI device");
+
+    assert_eq!(alpha.resources.device_ids, [PCI_ID]);
+    assert!(beta.resources.device_ids.is_empty());
+    assert!(
+        !snapshot
+            .resource_pool
+            .available_device_ids
+            .iter()
+            .any(|pci_id| pci_id == PCI_ID)
+    );
+    assert_eq!(device.iommu_group, Some(14));
+    assert_eq!(device.iommu_group_members, [PCI_ID]);
+
+    let outcome = executor.execute(&LifecycleRequest::Update(UpdateRequest {
+        instance: InstanceRequest {
+            expected_generation: snapshot.generation,
+            id: beta.id,
+        },
+        cpu_hardware_ids: None,
+        memory_bytes: None,
+        device_ids: Some(vec![PCI_ID.into()]),
+        dry_run: false,
+    }));
+
+    assert!(matches!(
+        outcome,
+        Err(LifecycleExecutionError::Plan(
+            LifecyclePlanError::DevicePlacement(DevicePlacementError::OwnedByPeer {
+                pci_id,
+                peer_name
+            })
+        )) if pci_id == PCI_ID && peer_name == "alpha"
+    ));
+}
+
+#[test]
+#[ignore = "requires a prepared Multikernel VM with beta and an available isolated PCI device"]
+fn reconciles_isolated_device_assignment() {
+    const PCI_ID: &str = "0000:06:00.0";
+    let daemon = env::var_os("KERNMUXD_BINARY").expect("KERNMUXD_BINARY must identify kernmuxd");
+    let source = ProcessInventorySource::new(
+        daemon,
+        [OsString::from("--inventory-helper")],
+        Duration::from_secs(10),
+    );
+    let inventory = InventoryService::new(source);
+    let runner = ProcessKerfRunner::system(Duration::from_secs(30), 1024 * 1024);
+    let mut executor = LifecycleExecutor::new(runner, inventory);
+    let snapshot = executor.refresh_snapshot().unwrap();
+    let beta = snapshot
+        .instances
+        .iter()
+        .find(|instance| instance.name == "beta")
+        .expect("prepared VM must contain beta");
+    let device = snapshot
+        .resource_pool
+        .devices
+        .iter()
+        .find(|device| device.pci_id == PCI_ID)
+        .expect("prepared VM must expose the managed PCI device");
+
+    assert!(beta.resources.device_ids.is_empty());
+    assert!(
+        snapshot
+            .resource_pool
+            .available_device_ids
+            .iter()
+            .any(|pci_id| pci_id == PCI_ID)
+    );
+    assert_eq!(device.iommu_group, Some(14));
+    assert_eq!(device.iommu_group_members, [PCI_ID]);
+
+    assert_succeeded(executor.execute(&LifecycleRequest::Update(UpdateRequest {
+        instance: InstanceRequest {
+            expected_generation: snapshot.generation,
+            id: beta.id,
+        },
+        cpu_hardware_ids: None,
+        memory_bytes: None,
+        device_ids: Some(vec![PCI_ID.into()]),
+        dry_run: false,
+    })));
+
+    let after = executor.refresh_snapshot().unwrap();
+    let beta = after
+        .instances
+        .iter()
+        .find(|instance| instance.name == "beta")
+        .unwrap();
+    assert_eq!(beta.resources.device_ids, [PCI_ID]);
+    assert!(
+        !after
+            .resource_pool
+            .available_device_ids
+            .iter()
+            .any(|pci_id| pci_id == PCI_ID)
+    );
 }
 
 fn request(expected_generation: kernmux_api::v1::Generation) -> InstanceRequest {

@@ -73,11 +73,23 @@ impl MultikernelProbe {
             });
         }
         memory_regions.sort_by_key(|region| region.base);
+        let devices = resources
+            .children()
+            .find(|node| node.name == "devices")
+            .map(|devices| {
+                devices
+                    .children()
+                    .map(|node| self.read_device(node))
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
 
         Ok(ResourcePoolObservation {
             cpu_hardware_ids,
             available_cpu_hardware_ids,
             memory_regions,
+            devices,
         })
     }
 
@@ -125,6 +137,17 @@ impl MultikernelProbe {
                     cpu_hardware_ids,
                     memory_base: property_u64(resources.property("memory-base"), "memory-base")?,
                     memory_bytes: property_u64(resources.property("memory-bytes"), "memory-bytes")?,
+                    devices: resources
+                        .children()
+                        .find(|node| node.name == "devices")
+                        .map(|devices| {
+                            devices
+                                .children()
+                                .map(|node| self.read_device(node))
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                        .transpose()?
+                        .unwrap_or_default(),
                 },
                 image: KernelImageObservation {
                     present: matches!(
@@ -136,6 +159,50 @@ impl MultikernelProbe {
         }
         instances.sort_by_key(|instance| instance.id);
         Ok(instances)
+    }
+
+    fn read_device(
+        &self,
+        node: fdt::node::FdtNode<'_, '_>,
+    ) -> Result<PciDeviceObservation, InventoryError> {
+        let pci_id = property_string(node.property("pci-id"), "pci-id")?;
+        let iommu_group = self.read_iommu_group(&pci_id)?;
+        Ok(PciDeviceObservation {
+            pool_name: node.name.to_owned(),
+            pci_id,
+            vendor_id: property_optional_u32(node.property("vendor-id"), "vendor-id")?,
+            device_id: property_optional_u32(node.property("device-id"), "device-id")?,
+            iommu_group: iommu_group.as_ref().map(|(id, _)| *id),
+            iommu_group_members: iommu_group.map_or_else(Vec::new, |(_, members)| members),
+        })
+    }
+
+    fn read_iommu_group(&self, pci_id: &str) -> Result<Option<(u32, Vec<String>)>, InventoryError> {
+        let link = self.path(&format!("sys/bus/pci/devices/{pci_id}/iommu_group"));
+        let target = match fs::read_link(&link) {
+            Ok(target) => target,
+            Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(source) => return Err(InventoryError::io(link, source)),
+        };
+        let id = target
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| InventoryError::invalid(&link, "IOMMU group target has no numeric ID"))?
+            .parse::<u32>()
+            .map_err(|error| {
+                InventoryError::invalid(&link, format!("invalid IOMMU group ID: {error}"))
+            })?;
+        let directory = self.path(&format!("sys/kernel/iommu_groups/{id}/devices"));
+        let mut members = fs::read_dir(&directory)
+            .map_err(|source| InventoryError::io(&directory, source))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                    .map_err(|source| InventoryError::io(&directory, source))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        members.sort();
+        Ok(Some((id, members)))
     }
 
     fn read_transactions(&self) -> Result<Vec<TransactionObservation>, InventoryError> {
@@ -215,6 +282,20 @@ pub struct ResourcePoolObservation {
     pub cpu_hardware_ids: Vec<u32>,
     pub available_cpu_hardware_ids: Vec<u32>,
     pub memory_regions: Vec<MemoryRegionObservation>,
+    #[serde(default)]
+    pub devices: Vec<PciDeviceObservation>,
+}
+
+/// One PCI device managed by the Multikernel resource hierarchy.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PciDeviceObservation {
+    pub pool_name: String,
+    pub pci_id: String,
+    pub vendor_id: Option<u32>,
+    pub device_id: Option<u32>,
+    pub iommu_group: Option<u32>,
+    #[serde(default)]
+    pub iommu_group_members: Vec<String>,
 }
 
 /// One contiguous memory region in the resource pool.
@@ -241,6 +322,8 @@ pub struct InstanceResourceObservation {
     pub cpu_hardware_ids: Vec<u32>,
     pub memory_base: u64,
     pub memory_bytes: u64,
+    #[serde(default)]
+    pub devices: Vec<PciDeviceObservation>,
 }
 
 /// Image state that can be authoritatively observed from the kernel.
@@ -391,6 +474,25 @@ fn property_u32(property: Option<NodeProperty<'_>>, name: &str) -> Result<u32, I
     }
 }
 
+fn property_optional_u32(
+    property: Option<NodeProperty<'_>>,
+    name: &str,
+) -> Result<Option<u32>, InventoryError> {
+    property
+        .map(|property| property_u32(Some(property), name))
+        .transpose()
+}
+
+fn property_string(
+    property: Option<NodeProperty<'_>>,
+    name: &str,
+) -> Result<String, InventoryError> {
+    property
+        .and_then(NodeProperty::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| InventoryError::invalid("device_tree", format!("missing or invalid {name}")))
+}
+
 fn property_u64(property: Option<NodeProperty<'_>>, name: &str) -> Result<u64, InventoryError> {
     let cells = property_cells(property, name)?;
     match cells.as_slice() {
@@ -440,7 +542,7 @@ fn join_cells(high: u32, low: u32) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, os::unix::fs::symlink};
 
     use tempfile::TempDir;
 
@@ -462,10 +564,29 @@ mod tests {
         fs::write(path, contents).expect("fixture must be written");
     }
 
+    fn iommu_device(root: &Path, pci_id: &str, group: u32, members: &[&str]) {
+        let device = root.join(format!("sys/bus/pci/devices/{pci_id}"));
+        fs::create_dir_all(&device).expect("PCI fixture directory must be created");
+        symlink(
+            format!("../../../../kernel/iommu_groups/{group}"),
+            device.join("iommu_group"),
+        )
+        .expect("IOMMU group fixture link must be created");
+        for member in members {
+            write(
+                root,
+                &format!("sys/kernel/iommu_groups/{group}/devices/{member}"),
+                "",
+            );
+        }
+    }
+
     #[test]
     fn normalizes_resource_instance_and_transaction_state() {
         let root = TempDir::new().expect("temporary root must be created");
         write(root.path(), "sys/fs/multikernel/device_tree", BASELINE_DTB);
+        iommu_device(root.path(), "0000:05:00.0", 13, &["0000:05:00.0"]);
+        iommu_device(root.path(), "0000:06:00.0", 14, &["0000:06:00.0"]);
         write(root.path(), "sys/fs/multikernel/instances/lab/id", "1\n");
         write(
             root.path(),
@@ -504,6 +625,12 @@ mod tests {
 
         assert_eq!(observed.pool.cpu_hardware_ids, [4, 5, 6, 7]);
         assert_eq!(observed.pool.available_cpu_hardware_ids, [4, 5, 6, 7]);
+        assert_eq!(observed.pool.devices[0].pci_id, "0000:05:00.0");
+        assert_eq!(observed.pool.devices[0].iommu_group, Some(13));
+        assert_eq!(
+            observed.pool.devices[0].iommu_group_members,
+            ["0000:05:00.0"]
+        );
         assert_eq!(
             observed.pool.memory_regions,
             [MemoryRegionObservation {
@@ -518,6 +645,14 @@ mod tests {
         assert!(observed.instances[0].image.present);
         assert_eq!(observed.instances[0].resources.cpu_hardware_ids, [4, 5]);
         assert_eq!(observed.instances[0].resources.memory_bytes, 0x4000_0000);
+        assert_eq!(
+            observed.instances[0].resources.devices[0].pci_id,
+            "0000:06:00.0"
+        );
+        assert_eq!(
+            observed.instances[0].resources.devices[0].iommu_group,
+            Some(14)
+        );
         assert_eq!(observed.transactions.len(), 1);
         assert_eq!(observed.transactions[0].status, TransactionStatus::Applied);
         assert_eq!(observed.transactions[0].resource_summary, None);

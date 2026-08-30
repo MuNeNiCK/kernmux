@@ -290,13 +290,18 @@ fn parse_instance(args: &[String]) -> Result<ApiRequest, CliError> {
             )
         }
         "update" => {
-            let options = Options::parse(tail, &["generation", "cpus", "memory"], &["dry-run"])?;
+            let options = Options::parse(
+                tail,
+                &["generation", "cpus", "memory", "devices"],
+                &["dry-run"],
+            )?;
             let id = options.one_positional("instance ID")?;
             let cpus = options.value("cpus").map(cpu_list).transpose()?;
             let memory = options.value("memory").map(byte_size).transpose()?;
-            if cpus.is_none() && memory.is_none() {
+            let devices = options.value("devices").map(string_list).transpose()?;
+            if cpus.is_none() && memory.is_none() && devices.is_none() {
                 return Err(CliError::usage(
-                    "instance update requires --cpus or --memory",
+                    "instance update requires --cpus, --memory, or --devices",
                 ));
             }
             json_request(
@@ -306,6 +311,7 @@ fn parse_instance(args: &[String]) -> Result<ApiRequest, CliError> {
                     expected_generation: generation(options.required("generation")?)?,
                     cpu_hardware_ids: cpus,
                     memory_bytes: memory,
+                    device_ids: devices,
                     dry_run: options.flag("dry-run"),
                 },
             )
@@ -751,6 +757,23 @@ fn cpu_list(value: &str) -> Result<Vec<u32>, CliError> {
     Ok(cpus.into_iter().collect())
 }
 
+fn string_list(value: &str) -> Result<Vec<String>, CliError> {
+    if value.is_empty() {
+        return Err(CliError::usage("device list must not be empty"));
+    }
+    value
+        .split(',')
+        .map(|item| {
+            let item = item.trim();
+            if item.is_empty() {
+                Err(CliError::usage("device list contains an empty item"))
+            } else {
+                Ok(item.to_owned())
+            }
+        })
+        .collect()
+}
+
 fn byte_size(value: &str) -> Result<u64, CliError> {
     let (digits, multiplier) = [
         ("KiB", 1024_u64),
@@ -812,7 +835,7 @@ Resources:
   instance list
   instance show ID
   instance create --generation N --id ID --name NAME --cpus LIST --memory SIZE
-  instance update ID --generation N [--cpus LIST] [--memory SIZE] [--dry-run]
+  instance update ID --generation N [--cpus LIST] [--memory SIZE] [--devices BDF[,BDF]] [--dry-run]
   instance load ID --generation N --kernel PATH [--initrd PATH] [--cmdline TEXT]
   instance start ID --generation N
   instance stop ID --generation N [--force]
@@ -887,6 +910,40 @@ mod tests {
         assert!(
             parse_invocation(&strings(&["instance", "update", "1", "--generation", "2"])).is_err()
         );
+        assert!(
+            parse_invocation(&strings(&[
+                "instance",
+                "update",
+                "1",
+                "--generation",
+                "2",
+                "--devices",
+                "0000:06:00.0,"
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_device_replacement_without_normalizing_identifiers() {
+        let invocation = parse_invocation(&strings(&[
+            "instance",
+            "update",
+            "1",
+            "--generation",
+            "2",
+            "--devices",
+            "0000:06:00.0,0000:07:00.0",
+            "--dry-run",
+        ]))
+        .unwrap();
+        let body: Value = serde_json::from_slice(&invocation.request.body).unwrap();
+
+        assert_eq!(
+            body["device_ids"],
+            serde_json::json!(["0000:06:00.0", "0000:07:00.0"])
+        );
+        assert_eq!(body["dry_run"], true);
     }
 
     #[test]

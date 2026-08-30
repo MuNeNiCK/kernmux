@@ -41,6 +41,7 @@ pub struct UpdateRequest {
     pub instance: InstanceRequest,
     pub cpu_hardware_ids: Option<Vec<u32>>,
     pub memory_bytes: Option<u64>,
+    pub device_ids: Option<Vec<String>>,
     pub dry_run: bool,
 }
 
@@ -70,6 +71,7 @@ pub enum ExpectedState {
         name: Option<String>,
         cpu_hardware_ids: Option<Vec<u32>>,
         memory_bytes: Option<u64>,
+        device_ids: Option<Vec<String>>,
     },
     ResourcePool {
         cpu_hardware_ids: Vec<u32>,
@@ -179,6 +181,7 @@ fn plan_create(
             name: Some(request.name.clone()),
             cpu_hardware_ids: Some(request.cpu_hardware_ids.clone()),
             memory_bytes: Some(request.memory_bytes),
+            device_ids: None,
         },
         mutates_kernel: true,
     })
@@ -190,9 +193,12 @@ fn plan_update(
 ) -> Result<KerfInvocation, LifecyclePlanError> {
     let instance = require_instance(snapshot, request.instance.id, InstanceState::Ready)?;
     validate_name(&instance.name)?;
-    if request.cpu_hardware_ids.is_none() && request.memory_bytes.is_none() {
+    if request.cpu_hardware_ids.is_none()
+        && request.memory_bytes.is_none()
+        && request.device_ids.is_none()
+    {
         return Err(LifecyclePlanError::InvalidRequest(
-            "an update must specify CPU or memory resources",
+            "an update must specify CPU, memory, or device resources",
         ));
     }
     let mut arguments = vec!["update".into(), instance.name.clone().into()];
@@ -212,6 +218,11 @@ fn plan_update(
             .map_err(LifecyclePlanError::MemoryPlacement)?;
         arguments.push(option("--memory=", memory));
     }
+    if let Some(devices) = &request.device_ids {
+        validate_update_devices(snapshot, instance, devices)
+            .map_err(LifecyclePlanError::DevicePlacement)?;
+        arguments.push(option("--devices=", devices.join(",")));
+    }
     if request.dry_run {
         arguments.push("--dry-run".into());
     }
@@ -223,6 +234,7 @@ fn plan_update(
             name: None,
             cpu_hardware_ids: request.cpu_hardware_ids.clone(),
             memory_bytes: request.memory_bytes,
+            device_ids: request.device_ids.clone(),
         },
         mutates_kernel: !request.dry_run,
     })
@@ -451,6 +463,169 @@ fn checked_sum(mut values: impl Iterator<Item = u64>) -> Result<u64, MemoryPlace
     })
 }
 
+fn validate_update_devices(
+    snapshot: &HostSnapshot,
+    instance: &Instance,
+    requested: &[String],
+) -> Result<(), DevicePlacementError> {
+    if requested.is_empty() {
+        return Err(DevicePlacementError::EmptySelection);
+    }
+    let requested_set = requested.iter().cloned().collect::<BTreeSet<_>>();
+    if requested_set.len() != requested.len() {
+        return Err(DevicePlacementError::Duplicate);
+    }
+    if let Some(pci_id) = requested.iter().find(|pci_id| !is_canonical_pci_id(pci_id)) {
+        return Err(DevicePlacementError::InvalidPciId((*pci_id).clone()));
+    }
+    for peer in snapshot
+        .instances
+        .iter()
+        .filter(|peer| peer.id != instance.id)
+    {
+        if let Some(pci_id) = peer
+            .resources
+            .device_ids
+            .iter()
+            .find(|pci_id| requested_set.contains(*pci_id))
+        {
+            return Err(DevicePlacementError::OwnedByPeer {
+                pci_id: pci_id.clone(),
+                peer_name: peer.name.clone(),
+            });
+        }
+    }
+    let managed = snapshot
+        .resource_pool
+        .devices
+        .iter()
+        .map(|device| (device.pci_id.as_str(), device))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let available = snapshot
+        .resource_pool
+        .available_device_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let owned = instance
+        .resources
+        .device_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    for pci_id in requested {
+        let device = managed
+            .get(pci_id.as_str())
+            .ok_or_else(|| DevicePlacementError::NotManaged(pci_id.clone()))?;
+        if !available.contains(pci_id.as_str()) && !owned.contains(pci_id.as_str()) {
+            return Err(DevicePlacementError::Unavailable(pci_id.clone()));
+        }
+        let group = device
+            .iommu_group
+            .ok_or_else(|| DevicePlacementError::MissingIommuGroup(pci_id.clone()))?;
+        let missing = device
+            .iommu_group_members
+            .iter()
+            .filter(|member| {
+                !requested_set.contains(*member) || !managed.contains_key(member.as_str())
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(DevicePlacementError::IncompleteIommuGroup {
+                pci_id: pci_id.clone(),
+                group,
+                missing,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_canonical_pci_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 12
+        && bytes[4] == b':'
+        && bytes[7] == b':'
+        && bytes[10] == b'.'
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10) || byte.is_ascii_digit() || (b'a'..=b'f').contains(byte)
+        })
+}
+
+/// A device replacement that cannot be applied safely.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DevicePlacementError {
+    EmptySelection,
+    InvalidPciId(String),
+    Duplicate,
+    NotManaged(String),
+    Unavailable(String),
+    OwnedByPeer {
+        pci_id: String,
+        peer_name: String,
+    },
+    MissingIommuGroup(String),
+    IncompleteIommuGroup {
+        pci_id: String,
+        group: u32,
+        missing: Vec<String>,
+    },
+}
+
+impl DevicePlacementError {
+    const fn error_code(&self) -> ErrorCode {
+        match self {
+            Self::EmptySelection | Self::InvalidPciId(_) | Self::Duplicate => {
+                ErrorCode::InvalidRequest
+            }
+            Self::NotManaged(_)
+            | Self::Unavailable(_)
+            | Self::OwnedByPeer { .. }
+            | Self::MissingIommuGroup(_)
+            | Self::IncompleteIommuGroup { .. } => ErrorCode::Conflict,
+        }
+    }
+}
+
+impl fmt::Display for DevicePlacementError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptySelection => formatter.write_str(
+                "an empty device replacement is unsupported; delete the owner or request a non-empty replacement",
+            ),
+            Self::InvalidPciId(value) => write!(
+                formatter,
+                "PCI device ID '{value}' is not a canonical lowercase domain:bus:slot.function address"
+            ),
+            Self::Duplicate => formatter.write_str("device replacement contains duplicate PCI IDs"),
+            Self::NotManaged(pci_id) => {
+                write!(formatter, "PCI device {pci_id} is not managed by the Multikernel pool")
+            }
+            Self::Unavailable(pci_id) => {
+                write!(formatter, "PCI device {pci_id} is not available to this instance")
+            }
+            Self::OwnedByPeer { pci_id, peer_name } => {
+                write!(formatter, "PCI device {pci_id} is owned by instance '{peer_name}'")
+            }
+            Self::MissingIommuGroup(pci_id) => {
+                write!(formatter, "PCI device {pci_id} has no authoritative IOMMU group")
+            }
+            Self::IncompleteIommuGroup {
+                pci_id,
+                group,
+                missing,
+            } => write!(
+                formatter,
+                "PCI device {pci_id} requires every member of IOMMU group {group}; missing {}",
+                missing.join(",")
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DevicePlacementError {}
+
 /// A memory request that cannot be placed safely in authoritative pool state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MemoryPlacementError {
@@ -544,6 +719,7 @@ pub enum LifecyclePlanError {
     InvalidRequest(&'static str),
     CpuPlacement(CpuPlacementError),
     MemoryPlacement(MemoryPlacementError),
+    DevicePlacement(DevicePlacementError),
     NotFound,
     AlreadyExists,
     InvalidState {
@@ -560,6 +736,7 @@ impl LifecyclePlanError {
             Self::StaleGeneration { .. } => ErrorCode::PreconditionFailed,
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::NotFound => ErrorCode::NotFound,
+            Self::DevicePlacement(error) => error.error_code(),
             Self::CpuPlacement(_)
             | Self::MemoryPlacement(_)
             | Self::AlreadyExists
@@ -581,6 +758,9 @@ impl fmt::Display for LifecyclePlanError {
             Self::MemoryPlacement(error) => {
                 write!(formatter, "memory placement was rejected: {error}")
             }
+            Self::DevicePlacement(error) => {
+                write!(formatter, "device placement was rejected: {error}")
+            }
             Self::NotFound => formatter.write_str("instance was not found"),
             Self::AlreadyExists => formatter.write_str("instance ID or name already exists"),
             Self::InvalidState { required, actual } => {
@@ -598,8 +778,8 @@ impl std::error::Error for LifecyclePlanError {}
 #[cfg(test)]
 mod tests {
     use kernmux_api::v1::{
-        CpuTopology, HostMemory, KernelImage, KernelInfo, MemoryRegion, ResourceAllocation,
-        ResourcePool, SnapshotHealth,
+        CpuTopology, HostMemory, KernelImage, KernelInfo, MemoryRegion, PciDevice,
+        ResourceAllocation, ResourcePool, SnapshotHealth,
     };
 
     use super::*;
@@ -633,6 +813,8 @@ mod tests {
                     bytes: 3_221_225_472,
                     numa_node: 0,
                 }],
+                devices: Vec::new(),
+                available_device_ids: Vec::new(),
             },
             instances: state
                 .map(|state| kernmux_api::v1::Instance {
@@ -660,6 +842,17 @@ mod tests {
         InstanceRequest {
             expected_generation: Generation(7),
             id: InstanceId(1),
+        }
+    }
+
+    fn pci_device(pci_id: &str, group: Option<u32>, members: &[&str]) -> PciDevice {
+        PciDevice {
+            pci_id: pci_id.into(),
+            pool_name: pci_id.replace([':', '.'], "_"),
+            vendor_id: Some(0x1af4),
+            device_id: Some(0x1044),
+            iommu_group: group,
+            iommu_group_members: members.iter().map(|member| (*member).into()).collect(),
         }
     }
 
@@ -704,6 +897,7 @@ mod tests {
                 instance: instance_request(),
                 cpu_hardware_ids: Some(vec![4, 5, 6]),
                 memory_bytes: Some(1_610_612_736),
+                device_ids: None,
                 dry_run: true,
             }),
             &snapshot(Some(InstanceState::Ready)),
@@ -786,6 +980,113 @@ mod tests {
     }
 
     #[test]
+    fn plans_an_isolated_available_device_replacement() {
+        let mut host = snapshot(Some(InstanceState::Ready));
+        host.resource_pool.devices = vec![pci_device("0000:06:00.0", Some(14), &["0000:06:00.0"])];
+        host.resource_pool.available_device_ids = vec!["0000:06:00.0".into()];
+
+        let invocation = plan(
+            &LifecycleRequest::Update(UpdateRequest {
+                instance: instance_request(),
+                cpu_hardware_ids: None,
+                memory_bytes: None,
+                device_ids: Some(vec!["0000:06:00.0".into()]),
+                dry_run: false,
+            }),
+            &host,
+        )
+        .unwrap();
+
+        assert_eq!(
+            arguments(&invocation),
+            ["update", "lab", "--devices=0000:06:00.0"]
+        );
+    }
+
+    #[test]
+    fn rejects_peer_owned_and_incomplete_iommu_groups() {
+        let mut host = snapshot(Some(InstanceState::Ready));
+        host.resource_pool.devices = vec![pci_device("0000:06:00.0", Some(14), &["0000:06:00.0"])];
+        host.instances.push(kernmux_api::v1::Instance {
+            id: InstanceId(2),
+            name: "beta".into(),
+            generation: Generation(7),
+            state: InstanceState::Ready,
+            resources: ResourceAllocation {
+                device_ids: vec!["0000:06:00.0".into()],
+                ..ResourceAllocation::default()
+            },
+            image: KernelImage::default(),
+        });
+        let request = UpdateRequest {
+            instance: instance_request(),
+            cpu_hardware_ids: None,
+            memory_bytes: None,
+            device_ids: Some(vec!["0000:06:00.0".into()]),
+            dry_run: false,
+        };
+
+        assert!(matches!(
+            plan(&LifecycleRequest::Update(request.clone()), &host),
+            Err(LifecyclePlanError::DevicePlacement(
+                DevicePlacementError::OwnedByPeer { peer_name, .. }
+            )) if peer_name == "beta"
+        ));
+
+        host.instances.pop();
+        host.resource_pool.available_device_ids = vec!["0000:06:00.0".into()];
+        host.resource_pool.devices[0].iommu_group_members = vec![
+            "0000:00:1f.0".into(),
+            "0000:00:1f.2".into(),
+            "0000:06:00.0".into(),
+        ];
+        assert!(matches!(
+            plan(&LifecycleRequest::Update(request), &host),
+            Err(LifecyclePlanError::DevicePlacement(
+                DevicePlacementError::IncompleteIommuGroup { group: 14, .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_unverifiable_device_replacements() {
+        let mut host = snapshot(Some(InstanceState::Ready));
+        host.resource_pool.devices = vec![pci_device("0000:06:00.0", None, &[])];
+        host.resource_pool.available_device_ids = vec!["0000:06:00.0".into()];
+        let error = |device_ids| {
+            plan(
+                &LifecycleRequest::Update(UpdateRequest {
+                    instance: instance_request(),
+                    cpu_hardware_ids: None,
+                    memory_bytes: None,
+                    device_ids: Some(device_ids),
+                    dry_run: false,
+                }),
+                &host,
+            )
+            .unwrap_err()
+        };
+
+        assert_eq!(error(Vec::new()).error_code(), ErrorCode::InvalidRequest);
+        assert_eq!(
+            error(vec!["0000:06:00.0".into(), "0000:06:00.0".into()]).error_code(),
+            ErrorCode::InvalidRequest
+        );
+        assert_eq!(
+            error(vec!["0000:06:00.A".into()]).error_code(),
+            ErrorCode::InvalidRequest
+        );
+        assert!(matches!(
+            error(vec!["0000:07:00.0".into()]),
+            LifecyclePlanError::DevicePlacement(DevicePlacementError::NotManaged(_))
+        ));
+        assert!(matches!(
+            error(vec!["0000:06:00.0".into()]),
+            LifecyclePlanError::DevicePlacement(DevicePlacementError::MissingIommuGroup(_))
+        ));
+    }
+
+    #[test]
     fn rejects_stale_unsafe_and_state_incompatible_requests() {
         let stale = LifecycleRequest::Start(InstanceRequest {
             expected_generation: Generation(6),
@@ -843,6 +1144,7 @@ mod tests {
                 instance: instance_request(),
                 cpu_hardware_ids: None,
                 memory_bytes: Some(2 * GIB),
+                device_ids: None,
                 dry_run: false,
             }),
             &host,
@@ -864,6 +1166,7 @@ mod tests {
                     instance: instance_request(),
                     cpu_hardware_ids: None,
                     memory_bytes: Some(2 * GIB),
+                    device_ids: None,
                     dry_run: false,
                 }),
                 &host,
@@ -885,6 +1188,7 @@ mod tests {
                     instance: instance_request(),
                     cpu_hardware_ids: None,
                     memory_bytes: Some(requested),
+                    device_ids: None,
                     dry_run: true,
                 }),
                 &host,
@@ -917,6 +1221,7 @@ mod tests {
                 instance: instance_request(),
                 cpu_hardware_ids: None,
                 memory_bytes: Some(memory_bytes),
+                device_ids: None,
                 dry_run: false,
             })
         };
