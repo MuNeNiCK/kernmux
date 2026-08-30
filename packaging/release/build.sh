@@ -5,6 +5,8 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 release_version=${KERNMUX_RELEASE_VERSION:-0.1.0}
 package_revision=${KERNMUX_PACKAGE_REVISION:-1}
 output_dir=${KERNMUX_OUTPUT_DIR:-"$repo_root/dist"}
+rust_target=${KERNMUX_RUST_TARGET:-x86_64-unknown-linux-musl}
+use_prebuilt=${KERNMUX_RELEASE_USE_PREBUILT:-0}
 
 case "$release_version" in
     ''|*[!0-9A-Za-z.+~_-]*)
@@ -18,6 +20,13 @@ case "$package_revision" in
         exit 2
         ;;
 esac
+case "$use_prebuilt" in
+    0|1) ;;
+    *)
+        echo "KERNMUX_RELEASE_USE_PREBUILT must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
 
 if [ -n "$(git -C "$repo_root" status --porcelain --untracked-files=all)" ]; then
     echo "release artifacts must be built from a clean source tree" >&2
@@ -28,6 +37,20 @@ source_date_epoch=${SOURCE_DATE_EPOCH:-$(git -C "$repo_root" log -1 --format=%ct
 export SOURCE_DATE_EPOCH=$source_date_epoch
 export KERNMUX_PACKAGE_VERSION="${release_version}-${package_revision}"
 export KERNMUX_OUTPUT_DIR=$output_dir
+export KERNMUX_RUST_TARGET=$rust_target
+
+if [ "$use_prebuilt" -eq 0 ]; then
+    cargo build --locked --release --target "$rust_target" \
+        --manifest-path "$repo_root/Cargo.toml" \
+        -p kernmux-daemon -p kernmux-cli
+else
+    for binary in kernmuxd kernmuxctl; do
+        test -x "$repo_root/target/$rust_target/release/$binary" || {
+            echo "missing explicit prebuilt binary: $binary" >&2
+            exit 4
+        }
+    done
+fi
 
 install -d "$output_dir"
 package="$output_dir/kernmux_${KERNMUX_PACKAGE_VERSION}_amd64.deb"
