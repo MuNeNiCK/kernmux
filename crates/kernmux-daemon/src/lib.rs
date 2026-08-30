@@ -1,5 +1,6 @@
 //! Headless Kernmux host-management service.
 
+mod compatibility;
 pub mod console;
 pub mod host_api;
 pub mod image_store;

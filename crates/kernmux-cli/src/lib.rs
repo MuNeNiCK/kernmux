@@ -161,7 +161,12 @@ fn execute(arguments: impl IntoIterator<Item = OsString>) -> Result<Output, CliE
         &invocation.request_id,
         &invocation.request,
     )?;
-    let code = response_exit_code(response.status, &response.value)?;
+    let mut code = response_exit_code(response.status, &response.value)?;
+    if invocation.request.path == "/1.0/compatibility"
+        && response.value.pointer("/data/compatible") == Some(&Value::Bool(false))
+    {
+        code = ExitCode::RequestRejected;
+    }
     Ok(Output::Response {
         value: response.value,
         pretty: invocation.pretty,
@@ -284,8 +289,11 @@ fn artifact_id(value: &str) -> Result<&str, CliError> {
 }
 
 fn parse_host(args: &[String]) -> Result<ApiRequest, CliError> {
-    exact_action(args, "show")?;
-    Ok(get("/1.0"))
+    match args {
+        [action] if action == "show" => Ok(get("/1.0")),
+        [action] if action == "preflight" => Ok(get("/1.0/compatibility")),
+        _ => Err(CliError::usage("host action must be show or preflight")),
+    }
 }
 
 fn parse_pool(args: &[String]) -> Result<ApiRequest, CliError> {
@@ -768,14 +776,6 @@ fn get(path: &str) -> ApiRequest {
     }
 }
 
-fn exact_action(args: &[String], expected: &str) -> Result<(), CliError> {
-    if args == [expected] {
-        Ok(())
-    } else {
-        Err(CliError::usage(format!("expected action {expected}")))
-    }
-}
-
 fn only_id(args: &[String]) -> Result<u32, CliError> {
     number(only_token(args, "instance ID")?, "instance ID")
 }
@@ -910,6 +910,7 @@ Usage: kernmuxctl [--socket PATH] [--pretty] [--request-id ID] RESOURCE ACTION [
 
 Resources:
   host show
+  host preflight
   pool show
   pool set --generation N --cpus LIST --memory SIZE
   pool release --generation N
@@ -948,6 +949,14 @@ Default socket: {DEFAULT_SOCKET}"
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn parses_host_preflight_as_a_read_only_versioned_request() {
+        let request = parse_command(&strings(&["host", "preflight"])).unwrap();
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/1.0/compatibility");
+        assert!(request.body.is_empty());
+    }
 
     #[test]
     fn parses_resource_commands_into_versioned_requests() {

@@ -9,13 +9,14 @@ use std::{
 use hyper::{Method, StatusCode};
 use kernmux_api::v1::{
     ApiError, CreateInstanceMutation, ErrorCode, EventPage, EventSequence, Generation,
-    ImageArtifact, ImageKind, ImportImageMutation, InstanceId, InstanceLifecycleMutation,
-    LoadInstanceMutation, LoadManagedImageMutation, Operation, OperationId, OperationKind,
-    ResourceKind, ResourcePoolMutation, ResourceReference, Response, StopInstanceMutation,
-    UpdateInstanceMutation,
+    HostCompatibilityReport, ImageArtifact, ImageKind, ImportImageMutation, InstanceId,
+    InstanceLifecycleMutation, LoadInstanceMutation, LoadManagedImageMutation, Operation,
+    OperationId, OperationKind, ResourceKind, ResourcePoolMutation, ResourceReference, Response,
+    StopInstanceMutation, UpdateInstanceMutation,
 };
 
 use crate::{
+    compatibility,
     console::{CONSOLE_UPGRADE_PROTOCOL, ConsoleProxy, MkttyDeviceFactory, serve_framed_console},
     image_store::{
         ArtifactId, ArtifactKind, ArtifactRecord, ImageCatalog, ImageCatalogError, ImageStore,
@@ -131,6 +132,7 @@ impl ImagePolicy {
 /// Concrete dispatch configuration for a running host.
 #[derive(Clone, Debug)]
 pub struct RunningHostApiConfig {
+    pub compatibility_manifest: Option<PathBuf>,
     pub image_roots: Vec<PathBuf>,
     pub image_store_root: PathBuf,
     pub max_image_bytes: u64,
@@ -147,6 +149,7 @@ impl RunningHostApiConfig {
     #[must_use]
     pub fn system_default() -> Self {
         Self {
+            compatibility_manifest: None,
             image_roots: vec![
                 PathBuf::from("/boot"),
                 PathBuf::from("/var/lib/kernmux/images"),
@@ -177,6 +180,7 @@ pub struct HostApi<I, LR, LS, PR, PS> {
     limiter: ServiceLimiter,
     image_policy: ImagePolicy,
     image_catalog: Arc<Mutex<ImageCatalog>>,
+    compatibility_report: Option<(Generation, HostCompatibilityReport)>,
     console: ConsoleProxy<MkttyDeviceFactory>,
 }
 
@@ -208,6 +212,7 @@ impl<I, LR, LS, PR, PS> HostApi<I, LR, LS, PR, PS> {
             limiter: infrastructure.limiter,
             image_policy: infrastructure.image_policy,
             image_catalog: Arc::new(Mutex::new(infrastructure.image_catalog)),
+            compatibility_report: infrastructure.compatibility_report,
             console: ConsoleProxy::new(MkttyDeviceFactory::running_host()),
         }
     }
@@ -219,6 +224,7 @@ struct HostApiInfrastructure {
     limiter: ServiceLimiter,
     image_policy: ImagePolicy,
     image_catalog: ImageCatalog,
+    compatibility_report: Option<(Generation, HostCompatibilityReport)>,
 }
 
 /// Running-host dispatcher type used by `kernmuxd`.
@@ -245,7 +251,27 @@ impl RunningHostApi {
         let registry = OperationRegistry::new(config.operation_capacity, config.event_capacity)
             .map_err(HostApiBuildError::Registry)?;
         let scheduler = OperationScheduler::new(registry.clone(), timestamp);
-        let inventory = SharedSnapshotRefresher::new(isolated_inventory(config.probe_deadline)?);
+        let mut inventory_service = isolated_inventory(config.probe_deadline)?;
+        let compatibility_report = if let Some(path) = &config.compatibility_manifest {
+            let snapshot = inventory_service.refresh_snapshot().map_err(|_| {
+                HostApiBuildError::Compatibility("host inventory is unavailable".into())
+            })?;
+            Some((
+                snapshot.generation,
+                compatibility::evaluate(
+                    path,
+                    Path::new("/"),
+                    Path::new("kerf"),
+                    config.probe_deadline,
+                    config.kerf_output_limit,
+                    &snapshot,
+                )
+                .map_err(HostApiBuildError::Compatibility)?,
+            ))
+        } else {
+            None
+        };
+        let inventory = SharedSnapshotRefresher::new(inventory_service);
         let lifecycle = LifecycleExecutor::new(
             ProcessKerfRunner::system(config.kerf_deadline, config.kerf_output_limit),
             inventory.clone(),
@@ -269,6 +295,7 @@ impl RunningHostApi {
                     limiter: limiter.clone(),
                     image_policy,
                     image_catalog: ImageCatalog::new(image_store),
+                    compatibility_report,
                 },
             ),
             limiter,
@@ -364,6 +391,7 @@ where
         let audit_id = request.request_id.clone();
         match (&request.method, path) {
             (&Method::GET, "/1.0") => self.snapshot(),
+            (&Method::GET, "/1.0/compatibility") => self.compatibility(),
             (&Method::GET, "/1.0/resource-pool") => self.resource_pool(),
             (&Method::GET, "/1.0/instances") => self.instances(),
             (&Method::GET, "/1.0/images") => self.images(),
@@ -576,6 +604,14 @@ where
             .map_err(|_| backend("host inventory is unavailable"))?;
         snapshot.operations = self.registry.operations();
         result_response(snapshot.generation, snapshot)
+    }
+
+    fn compatibility(&self) -> Result<LocalResponse, ApiError> {
+        let (generation, report) = self
+            .compatibility_report
+            .clone()
+            .ok_or_else(|| backend("compatibility manifest is not configured"))?;
+        result_response(generation, report)
     }
 
     fn instance(&self, id: InstanceId) -> Result<LocalResponse, ApiError> {
@@ -920,8 +956,8 @@ fn route_for(method: &Method, path: &str) -> Option<RouteSecurity> {
     match (method, path) {
         (
             &Method::GET,
-            "/1.0" | "/1.0/resource-pool" | "/1.0/instances" | "/1.0/images" | "/1.0/operations"
-            | "/1.0/events",
+            "/1.0" | "/1.0/compatibility" | "/1.0/resource-pool" | "/1.0/instances" | "/1.0/images"
+            | "/1.0/operations" | "/1.0/events",
         ) => Some(read),
         (&Method::POST, "/1.0/images") => Some(RouteSecurity {
             class: RequestClass::Administration,
@@ -1191,6 +1227,7 @@ pub enum HostApiBuildError {
     Registry(OperationRegistryError),
     ImageStore(ImageStoreError),
     CurrentExecutable(std::io::Error),
+    Compatibility(String),
 }
 
 impl std::fmt::Display for HostApiBuildError {
@@ -1202,6 +1239,9 @@ impl std::fmt::Display for HostApiBuildError {
             Self::CurrentExecutable(error) => {
                 write!(formatter, "failed to resolve service executable: {error}")
             }
+            Self::Compatibility(error) => {
+                write!(formatter, "host compatibility preflight failed: {error}")
+            }
         }
     }
 }
@@ -1211,7 +1251,7 @@ impl std::error::Error for HostApiBuildError {
         match self {
             Self::ImageStore(error) => Some(error),
             Self::CurrentExecutable(error) => Some(error),
-            Self::Configuration(_) | Self::Registry(_) => None,
+            Self::Configuration(_) | Self::Registry(_) | Self::Compatibility(_) => None,
         }
     }
 }
@@ -1228,6 +1268,10 @@ mod tests {
     fn routes_only_versioned_typed_resources() {
         assert_eq!(
             route_for(&Method::GET, "/1.0").unwrap().class,
+            RequestClass::ReadOnly
+        );
+        assert_eq!(
+            route_for(&Method::GET, "/1.0/compatibility").unwrap().class,
             RequestClass::ReadOnly
         );
         assert_eq!(

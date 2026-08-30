@@ -56,6 +56,14 @@ impl DaemonConfig {
             }
             host.image_store_root = value.into();
         }
+        if let Some(value) = optional_string(&mut lookup, "KERNMUX_COMPATIBILITY_MANIFEST")? {
+            if value.is_empty() {
+                return Err(config_error(
+                    "compatibility manifest path must not be empty",
+                ));
+            }
+            host.compatibility_manifest = Some(value.into());
+        }
         if let Some(value) = optional_string(&mut lookup, "KERNMUX_ALLOW_UNPRIVILEGED_READS")? {
             authorization = authorization.with_unprivileged_reads(parse_bool(&value)?);
         }
@@ -300,6 +308,10 @@ mod tests {
             ("KERNMUX_SOCKET_MODE", "600"),
             ("KERNMUX_IMAGE_STORE_ROOT", "/srv/kernmux/images"),
             ("KERNMUX_MAX_IMAGE_BYTES", "8192"),
+            (
+                "KERNMUX_COMPATIBILITY_MANIFEST",
+                "/etc/kernmux/release.json",
+            ),
         ]);
         let config =
             DaemonConfig::from_lookup(|name| values.get(name).map(OsString::from)).unwrap();
@@ -311,6 +323,10 @@ mod tests {
             std::path::Path::new("/srv/kernmux/images")
         );
         assert_eq!(config.host.max_image_bytes, 8192);
+        assert_eq!(
+            config.host.compatibility_manifest.as_deref(),
+            Some(std::path::Path::new("/etc/kernmux/release.json"))
+        );
         assert_eq!(
             config
                 .authorization

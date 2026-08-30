@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "release_id": "kernmux-0.1.0-mk2",
+  "os_id": "ubuntu",
+  "os_version_id": "24.04",
+  "architecture": "x86_64",
+  "kernel_release": "7.0.0-mk2-kernmux-mk+",
+  "required_capabilities": [
+    "multikernel",
+    "instance_lifecycle",
+    "transaction_rollback",
+    "console",
+    "shared_memory"
+  ],
+  "kerf_version": "0.2.0",
+  "kernmux_release": "0.1.0",
+  "kernmux_api_major": 1,
+  "state_schema": {
+    "readable_min": 1,
+    "readable_max": 1,
+    "writable_min": 1,
+    "writable_max": 1
+  }
+}

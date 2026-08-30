@@ -184,14 +184,13 @@ impl ProcessKerfRunner {
             stderr,
         })
     }
-}
 
-impl KerfRunner for ProcessKerfRunner {
-    type Error = KerfRunError;
-
-    fn run(&mut self, invocation: &KerfInvocation) -> Result<KerfRunResult, Self::Error> {
+    pub(crate) fn run_raw(
+        &mut self,
+        arguments: &[OsString],
+    ) -> Result<KerfRunResult, KerfRunError> {
         self.reap_pending()?;
-        let mut process = self.spawn(&invocation.arguments)?;
+        let mut process = self.spawn(arguments)?;
         let started = Instant::now();
         loop {
             if let Some(status) = process.child.try_wait().map_err(KerfRunError::Inspect)? {
@@ -225,6 +224,14 @@ impl KerfRunner for ProcessKerfRunner {
             }
             thread::sleep(POLL_INTERVAL.min(self.deadline));
         }
+    }
+}
+
+impl KerfRunner for ProcessKerfRunner {
+    type Error = KerfRunError;
+
+    fn run(&mut self, invocation: &KerfInvocation) -> Result<KerfRunResult, Self::Error> {
+        self.run_raw(&invocation.arguments)
     }
 }
 

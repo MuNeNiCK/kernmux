@@ -182,11 +182,14 @@ impl ReleaseCompatibilityManifest {
         );
 
         for capability in &self.required_capabilities {
+            let known = *capability != Capability::Unknown;
             checks.push(CompatibilityCheck {
-                name: format!("capability:{capability:?}").to_lowercase(),
-                passed: evidence.capabilities.contains(capability),
+                name: format!("capability:{}", capability_name(*capability)),
+                passed: known && evidence.capabilities.contains(capability),
                 expected: "present".into(),
-                observed: if evidence.capabilities.contains(capability) {
+                observed: if !known {
+                    "unsupported"
+                } else if evidence.capabilities.contains(capability) {
                     "present"
                 } else {
                     "absent"
@@ -229,6 +232,19 @@ impl ReleaseCompatibilityManifest {
             compatible: checks.iter().all(|check| check.passed),
             checks,
         }
+    }
+}
+
+const fn capability_name(capability: Capability) -> &'static str {
+    match capability {
+        Capability::Multikernel => "multikernel",
+        Capability::InstanceLifecycle => "instance_lifecycle",
+        Capability::DynamicResources => "dynamic_resources",
+        Capability::TransactionRollback => "transaction_rollback",
+        Capability::Console => "console",
+        Capability::DeviceAssignment => "device_assignment",
+        Capability::SharedMemory => "shared_memory",
+        Capability::Unknown => "unknown",
     }
 }
 
@@ -768,6 +784,22 @@ mod tests {
         let mut unreadable_state = evidence;
         unreadable_state.state_schema = 3;
         assert!(!manifest.evaluate(&unreadable_state).compatible);
+
+        let (_, mut read_only_state) = compatibility_fixture();
+        read_only_state.state_schema = 2;
+        let report = manifest.evaluate(&read_only_state);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "state_schema_readable" && check.passed)
+        );
+        assert!(!report.compatible);
+
+        let (mut unknown_manifest, mut unknown_evidence) = compatibility_fixture();
+        unknown_manifest.required_capabilities = vec![Capability::Unknown];
+        unknown_evidence.capabilities = vec![Capability::Unknown];
+        assert!(!unknown_manifest.evaluate(&unknown_evidence).compatible);
     }
 
     #[test]

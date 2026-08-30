@@ -1,10 +1,14 @@
 use std::{fs, path::Path};
 
-use kernmux_api::v1::{InstanceState, OperationKind};
+use kernmux_api::v1::{InstanceState, OperationKind, ReleaseCompatibilityManifest};
 use serde_json::Value;
 
 const FIXTURE_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/v1");
 const SUPPORTED_FIXTURE_VERSION: u64 = 1;
+const RELEASE_MANIFEST: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../packaging/release/compatibility.json"
+);
 
 fn read_json(relative_path: &str) -> Value {
     let path = Path::new(FIXTURE_ROOT).join(relative_path);
@@ -124,4 +128,13 @@ fn unsupported_fixture_versions_are_rejected() {
         require_supported_version(&fixture),
         Err("unsupported fixture version 2".into())
     );
+}
+
+#[test]
+fn packaged_release_manifest_uses_the_strict_public_contract() {
+    let bytes = fs::read(RELEASE_MANIFEST).expect("packaged release manifest must be readable");
+    let manifest: ReleaseCompatibilityManifest =
+        serde_json::from_slice(&bytes).expect("packaged release manifest must be valid");
+    assert_eq!(manifest.schema_version, 1);
+    assert!(!manifest.release_id.is_empty());
 }
