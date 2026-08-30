@@ -59,9 +59,16 @@ pub struct StopRequest {
 }
 
 /// Expected authoritative state after a planned mutation.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExpectedState {
     Instance(InstanceId, InstanceState),
+    InstanceResources {
+        id: InstanceId,
+        state: InstanceState,
+        name: Option<String>,
+        cpu_hardware_ids: Option<Vec<u32>>,
+        memory_bytes: Option<u64>,
+    },
     Absent(InstanceId),
 }
 
@@ -156,7 +163,13 @@ fn plan_create(
             option("--cpus=", cpu_list(&request.cpu_hardware_ids)),
             option("--memory=", request.memory_bytes),
         ],
-        expected_state: ExpectedState::Instance(request.id, InstanceState::Ready),
+        expected_state: ExpectedState::InstanceResources {
+            id: request.id,
+            state: InstanceState::Ready,
+            name: Some(request.name.clone()),
+            cpu_hardware_ids: Some(request.cpu_hardware_ids.clone()),
+            memory_bytes: Some(request.memory_bytes),
+        },
         mutates_kernel: true,
     })
 }
@@ -190,7 +203,13 @@ fn plan_update(
     }
     Ok(KerfInvocation {
         arguments,
-        expected_state: ExpectedState::Instance(request.instance.id, InstanceState::Ready),
+        expected_state: ExpectedState::InstanceResources {
+            id: request.instance.id,
+            state: InstanceState::Ready,
+            name: None,
+            cpu_hardware_ids: request.cpu_hardware_ids.clone(),
+            memory_bytes: request.memory_bytes,
+        },
         mutates_kernel: !request.dry_run,
     })
 }
@@ -485,10 +504,10 @@ mod tests {
                 "--memory=1073741824"
             ]
         );
-        assert_eq!(
+        assert!(matches!(
             create.expected_state,
-            ExpectedState::Instance(InstanceId(1), InstanceState::Ready)
-        );
+            ExpectedState::InstanceResources { .. }
+        ));
 
         let update = plan(
             &LifecycleRequest::Update(UpdateRequest {
@@ -511,6 +530,10 @@ mod tests {
             ]
         );
         assert!(!update.mutates_kernel);
+        assert!(matches!(
+            update.expected_state,
+            ExpectedState::InstanceResources { .. }
+        ));
     }
 
     #[test]

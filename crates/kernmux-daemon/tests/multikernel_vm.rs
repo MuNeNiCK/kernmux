@@ -1,7 +1,12 @@
 use std::{env, ffi::OsString, time::Duration};
 
+use kernmux_api::v1::InstanceId;
 use kernmux_daemon::inventory::{
     FilesystemInventorySource, InventoryService, ProcessInventorySource,
+};
+use kernmux_daemon::{
+    lifecycle::{ExpectedState, KerfInvocation},
+    lifecycle_executor::{KerfRunner, KerfTermination, ProcessKerfRunner},
 };
 
 #[test]
@@ -48,4 +53,20 @@ fn assembles_snapshot_through_isolated_probe() {
         snapshot.instances.len(),
         snapshot.transactions.len()
     );
+}
+
+#[test]
+#[ignore = "requires a Multikernel Linux VM with Kerf"]
+fn runs_kerf_through_bounded_process_backend() {
+    let invocation = KerfInvocation {
+        arguments: vec![OsString::from("show")],
+        expected_state: ExpectedState::Absent(InstanceId(511)),
+        mutates_kernel: false,
+    };
+    let mut runner = ProcessKerfRunner::system(Duration::from_secs(5), 1024 * 1024);
+
+    let result = runner.run(&invocation).expect("Kerf show must execute");
+
+    assert_eq!(result.termination, KerfTermination::Exited(0));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("No instances found"));
 }
