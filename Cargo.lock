@@ -85,6 +85,7 @@ name = "kernmux-core"
 version = "0.1.0"
 dependencies = [
  "fdt",
+ "serde",
  "tempfile",
 ]
 
@@ -94,6 +95,9 @@ version = "0.1.0"
 dependencies = [
  "kernmux-api",
  "kernmux-core",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

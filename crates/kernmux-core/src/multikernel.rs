@@ -6,6 +6,7 @@ use std::{
 };
 
 use fdt::{Fdt, node::NodeProperty};
+use serde::{Deserialize, Serialize};
 
 /// Root-relative reader for the Multikernel filesystem.
 #[derive(Clone, Debug)]
@@ -196,7 +197,7 @@ impl MultikernelProbe {
 }
 
 /// Normalized Multikernel observations.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MultikernelObservation {
     pub pool: ResourcePoolObservation,
     pub instances: Vec<InstanceObservation>,
@@ -204,7 +205,7 @@ pub struct MultikernelObservation {
 }
 
 /// Resources delegated from the control kernel to the Multikernel pool.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ResourcePoolObservation {
     pub cpu_hardware_ids: Vec<u32>,
     pub available_cpu_hardware_ids: Vec<u32>,
@@ -212,7 +213,7 @@ pub struct ResourcePoolObservation {
 }
 
 /// One contiguous memory region in the resource pool.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MemoryRegionObservation {
     pub base: u64,
     pub bytes: u64,
@@ -220,7 +221,7 @@ pub struct MemoryRegionObservation {
 }
 
 /// One peer-kernel instance discovered from sysfs.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct InstanceObservation {
     pub id: u32,
     pub name: String,
@@ -230,7 +231,7 @@ pub struct InstanceObservation {
 }
 
 /// Resources assigned to one instance.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct InstanceResourceObservation {
     pub cpu_hardware_ids: Vec<u32>,
     pub memory_base: u64,
@@ -238,13 +239,13 @@ pub struct InstanceResourceObservation {
 }
 
 /// Image state that can be authoritatively observed from the kernel.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct KernelImageObservation {
     pub present: bool,
 }
 
 /// Lifecycle state reported by Multikernel sysfs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum InstanceLifecycleState {
     Ready,
     Loaded,
@@ -266,7 +267,7 @@ impl InstanceLifecycleState {
 }
 
 /// Transaction retained by the Multikernel overlay filesystem.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TransactionObservation {
     pub id: u64,
     pub status: TransactionStatus,
@@ -275,7 +276,7 @@ pub struct TransactionObservation {
 }
 
 /// Kernel transaction status.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum TransactionStatus {
     Pending,
     Applied,

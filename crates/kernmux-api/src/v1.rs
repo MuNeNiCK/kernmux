@@ -26,6 +26,10 @@ pub struct OperationId(pub String);
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HostSnapshot {
     pub generation: Generation,
+    #[serde(default)]
+    pub health: SnapshotHealth,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<Diagnostic>,
     pub kernel: KernelInfo,
     pub capabilities: Vec<Capability>,
     pub topology: CpuTopology,
@@ -36,6 +40,17 @@ pub struct HostSnapshot {
     pub transactions: Vec<Transaction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub operations: Vec<Operation>,
+}
+
+/// Confidence in the freshness of an authoritative host snapshot.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotHealth {
+    #[default]
+    Healthy,
+    Indeterminate,
+    #[serde(other)]
+    Unknown,
 }
 
 /// Identity and compatibility information for the running control kernel.
@@ -462,6 +477,8 @@ mod tests {
     fn host_snapshot_and_transaction_round_trip() {
         let snapshot = HostSnapshot {
             generation: Generation(7),
+            health: SnapshotHealth::Healthy,
+            diagnostics: Vec::new(),
             kernel: KernelInfo {
                 release: "7.0.0-mk".into(),
                 multikernel_enabled: true,

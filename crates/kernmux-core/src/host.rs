@@ -6,6 +6,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use serde::{Deserialize, Serialize};
+
 /// Root-relative reader for Linux host interfaces.
 #[derive(Clone, Debug)]
 pub struct LinuxHostProbe {
@@ -198,7 +200,7 @@ impl LinuxHostProbe {
 }
 
 /// Normalized Linux observations before Multikernel inventory is merged.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct LinuxHostObservation {
     pub kernel_release: String,
     pub architecture: String,
@@ -209,7 +211,7 @@ pub struct LinuxHostObservation {
 }
 
 /// Host interfaces discovered at runtime.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HostCapabilities {
     supported: BTreeSet<HostCapability>,
 }
@@ -236,7 +238,7 @@ impl FromIterator<HostCapability> for HostCapabilities {
 }
 
 /// Runtime feature discovered from Linux host interfaces.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub enum HostCapability {
     Multikernel,
     InstanceLifecycle,
@@ -247,7 +249,7 @@ pub enum HostCapability {
 }
 
 /// One online logical CPU.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CpuObservation {
     pub logical_id: u32,
     pub hardware_id: u32,
@@ -258,7 +260,7 @@ pub struct CpuObservation {
 }
 
 /// One NUMA node.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NumaNodeObservation {
     pub id: u32,
     pub logical_cpu_ids: Vec<u32>,
@@ -267,7 +269,7 @@ pub struct NumaNodeObservation {
 }
 
 /// Host memory totals observed from procfs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HostMemoryObservation {
     pub total_bytes: u64,
     pub available_bytes: u64,
