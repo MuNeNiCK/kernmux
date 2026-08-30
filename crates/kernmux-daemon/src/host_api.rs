@@ -15,6 +15,7 @@ use kernmux_api::v1::{
 };
 
 use crate::{
+    console::{CONSOLE_UPGRADE_PROTOCOL, ConsoleProxy, MkttyDeviceFactory, serve_framed_console},
     inventory::{InventoryService, ProcessInventorySource},
     lifecycle::{
         CreateRequest, InstanceRequest, LifecycleRequest, LoadRequest, StopRequest, UpdateRequest,
@@ -30,7 +31,7 @@ use crate::{
         lifecycle_task_result, resource_pool_task_result,
     },
     security::{AuditAction, LimitKind, PeerIdentity, RequestClass, ServiceLimiter, ServiceLimits},
-    transport::{LocalApi, LocalRequest, LocalResponse, RouteSecurity},
+    transport::{LocalApi, LocalRequest, LocalResponse, LocalUpgrade, RouteSecurity},
 };
 
 const DEFAULT_OPERATION_CAPACITY: usize = 1024;
@@ -46,6 +47,7 @@ enum InstanceAction {
     Start,
     Stop,
     Unload,
+    Console,
 }
 
 /// Canonical roots from which kernel and initrd files may be loaded.
@@ -156,6 +158,7 @@ pub struct HostApi<I, LR, LS, PR, PS> {
     scheduler: OperationScheduler,
     limiter: ServiceLimiter,
     image_policy: ImagePolicy,
+    console: ConsoleProxy<MkttyDeviceFactory>,
 }
 
 impl<I, LR, LS, PR, PS> std::fmt::Debug for HostApi<I, LR, LS, PR, PS> {
@@ -189,6 +192,7 @@ impl<I, LR, LS, PR, PS> HostApi<I, LR, LS, PR, PS> {
             scheduler,
             limiter,
             image_policy,
+            console: ConsoleProxy::new(MkttyDeviceFactory::running_host()),
         }
     }
 }
@@ -266,6 +270,51 @@ where
     fn handle(&self, request: LocalRequest, peer: &PeerIdentity) -> LocalResponse {
         self.dispatch(request, peer)
             .unwrap_or_else(LocalResponse::api_error)
+    }
+
+    fn prepare_upgrade(
+        &self,
+        request: LocalRequest,
+        _peer: &PeerIdentity,
+    ) -> Result<LocalUpgrade, ApiError> {
+        let Some((instance_id, Some(InstanceAction::Console))) =
+            instance_resource(request.uri.path())
+        else {
+            return Err(not_found());
+        };
+        if request.method != Method::POST {
+            return Err(not_found());
+        }
+        let snapshot = self
+            .inventory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refresh_snapshot()
+            .map_err(|_| backend("host inventory is unavailable"))?;
+        let active = snapshot.instances.iter().any(|instance| {
+            instance.id == instance_id && instance.state == kernmux_api::v1::InstanceState::Active
+        });
+        if !active {
+            return Err(error(
+                ErrorCode::Conflict,
+                "instance must be active before attaching its console",
+                false,
+            ));
+        }
+        let permit = self.limiter.acquire(LimitKind::Console)?;
+        let mut session = self
+            .console
+            .attach(instance_id)
+            .map_err(|error| error.api_error())?;
+        Ok(LocalUpgrade::new(
+            CONSOLE_UPGRADE_PROTOCOL,
+            move |mut stream| {
+                let _permit = permit;
+                if let Err(error) = serve_framed_console(&mut stream, &mut session) {
+                    tracing::debug!(%error, instance_id = instance_id.0, "console stream closed");
+                }
+            },
+        ))
     }
 }
 
@@ -636,6 +685,10 @@ fn route_for(method: &Method, path: &str) -> Option<RouteSecurity> {
                         mutation
                     })
                 }
+                (&Method::POST, Some(InstanceAction::Console)) => Some(RouteSecurity {
+                    class: RequestClass::Console,
+                    audit_action: AuditAction::AttachConsole,
+                }),
                 (&Method::POST, Some(_)) => Some(mutation),
                 _ => None,
             }
@@ -658,6 +711,7 @@ fn instance_resource(path: &str) -> Option<(InstanceId, Option<InstanceAction>)>
         Some("start") => Some(InstanceAction::Start),
         Some("stop") => Some(InstanceAction::Stop),
         Some("unload") => Some(InstanceAction::Unload),
+        Some("console") => Some(InstanceAction::Console),
         Some(_) => return None,
     };
     if segments.next().is_some() {
@@ -822,6 +876,12 @@ mod tests {
                 .unwrap()
                 .class,
             RequestClass::Mutation
+        );
+        assert_eq!(
+            route_for(&Method::POST, "/1.0/instances/1/console")
+                .unwrap()
+                .class,
+            RequestClass::Console
         );
         assert!(route_for(&Method::POST, "/1.0/instances/1/unknown").is_none());
         assert!(route_for(&Method::GET, "/2.0").is_none());

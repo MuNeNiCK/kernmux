@@ -159,6 +159,12 @@ fn serves_typed_api_across_the_process_and_socket_boundary() {
     assert_eq!(malformed_mutation.body["kind"], "error");
     assert_eq!(malformed_mutation.body["error"]["code"], "invalid_request");
 
+    let inactive_console = daemon.request(
+        b"POST /1.0/instances/1/console HTTP/1.1\r\nHost: localhost\r\nConnection: upgrade, close\r\nUpgrade: kernmux-console-v1\r\n\r\n",
+    );
+    assert_eq!(inactive_console.status, 409);
+    assert_eq!(inactive_console.body["error"]["code"], "conflict");
+
     let invalid_correlation = daemon.request(&get("/1.0", "invalid correlation"));
     assert_eq!(invalid_correlation.status, 400);
     assert_eq!(invalid_correlation.body["error"]["code"], "invalid_request");

@@ -12,8 +12,11 @@ use std::{
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited};
 use hyper::{
-    Method, Request, Response as HttpResponse, StatusCode, Uri, body::Incoming,
-    server::conn::http1, service::service_fn,
+    Method, Request, Response as HttpResponse, StatusCode, Uri,
+    body::Incoming,
+    header::{CONNECTION, UPGRADE},
+    server::conn::http1,
+    service::service_fn,
 };
 use hyper_util::rt::TokioIo;
 use kernmux_api::v1::{ApiError, ErrorCode, Response};
@@ -51,6 +54,26 @@ pub struct LocalResponse {
     pub body: Vec<u8>,
 }
 
+/// Prepared handoff from authenticated HTTP to a binary local protocol.
+pub struct LocalUpgrade {
+    protocol: &'static str,
+    handler: Box<dyn FnOnce(std::os::unix::net::UnixStream) + Send>,
+}
+
+impl LocalUpgrade {
+    /// Creates an upgrade with its negotiated token and blocking stream task.
+    #[must_use]
+    pub fn new(
+        protocol: &'static str,
+        handler: impl FnOnce(std::os::unix::net::UnixStream) + Send + 'static,
+    ) -> Self {
+        Self {
+            protocol,
+            handler: Box::new(handler),
+        }
+    }
+}
+
 impl LocalResponse {
     /// Creates a JSON response from a serializable API value.
     ///
@@ -86,6 +109,23 @@ pub trait LocalApi: Send + Sync + 'static {
 
     /// Handles one authenticated and authorized bounded request.
     fn handle(&self, request: LocalRequest, peer: &PeerIdentity) -> LocalResponse;
+
+    /// Prepares a separately authorized binary protocol upgrade.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed API error when the route cannot be upgraded.
+    fn prepare_upgrade(
+        &self,
+        _request: LocalRequest,
+        _peer: &PeerIdentity,
+    ) -> Result<LocalUpgrade, ApiError> {
+        Err(api_error(
+            ErrorCode::Unsupported,
+            "binary protocol upgrade is not supported",
+            false,
+        ))
+    }
 }
 
 /// Configuration for one local HTTP listener.
@@ -236,6 +276,7 @@ where
             let _permit = permit;
             if let Err(error) = builder
                 .serve_connection(TokioIo::new(stream), service)
+                .with_upgrades()
                 .await
             {
                 tracing::debug!(%error, "local HTTP connection closed with protocol error");
@@ -281,6 +322,9 @@ where
         audit(&peer, route, AuditDecision::Denied, request_id.as_deref());
         return Ok(error_response(StatusCode::FORBIDDEN, error));
     }
+    if route.class == RequestClass::Console {
+        return handle_upgrade_request(request, api, peer, route, request_id).await;
+    }
     let (parts, body) = request.into_parts();
     let collected = Limited::new(body, max_request_bytes).collect().await;
     let body = if let Ok(body) = collected {
@@ -314,6 +358,106 @@ where
             internal_error("API request handler terminated unexpectedly"),
         ))
     }
+}
+
+async fn handle_upgrade_request<A>(
+    mut request: Request<Incoming>,
+    api: Arc<A>,
+    peer: PeerIdentity,
+    route: RouteSecurity,
+    request_id: Option<String>,
+) -> Result<HttpResponse<Full<Bytes>>, Infallible>
+where
+    A: LocalApi,
+{
+    let requested_protocol = request
+        .headers()
+        .get(UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty() && value.len() <= 64)
+        .map(str::to_owned);
+    let connection_upgrades = request
+        .headers()
+        .get(CONNECTION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        });
+    if requested_protocol.is_none() || !connection_upgrades {
+        audit(&peer, route, AuditDecision::Failed, request_id.as_deref());
+        return Ok(error_response(
+            StatusCode::UPGRADE_REQUIRED,
+            api_error(
+                ErrorCode::InvalidRequest,
+                "console route requires an HTTP protocol upgrade",
+                false,
+            ),
+        ));
+    }
+    let on_upgrade = hyper::upgrade::on(&mut request);
+    let local_request = LocalRequest {
+        method: request.method().clone(),
+        uri: request.uri().clone(),
+        request_id: request_id.clone(),
+        body: Vec::new(),
+    };
+    let peer_for_handler = peer.clone();
+    let prepared =
+        tokio::task::spawn_blocking(move || api.prepare_upgrade(local_request, &peer_for_handler))
+            .await;
+    let upgrade = match prepared {
+        Ok(Ok(upgrade)) if requested_protocol.as_deref() == Some(upgrade.protocol) => upgrade,
+        Ok(Ok(_)) => {
+            audit(&peer, route, AuditDecision::Failed, request_id.as_deref());
+            return Ok(error_response(
+                StatusCode::BAD_REQUEST,
+                api_error(
+                    ErrorCode::InvalidRequest,
+                    "console upgrade protocol is unsupported",
+                    false,
+                ),
+            ));
+        }
+        Ok(Err(error)) => {
+            audit(&peer, route, AuditDecision::Failed, request_id.as_deref());
+            return Ok(error_response(status_for_error(error.code), error));
+        }
+        Err(_) => {
+            audit(&peer, route, AuditDecision::Failed, request_id.as_deref());
+            return Ok(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                internal_error("console attachment handler terminated unexpectedly"),
+            ));
+        }
+    };
+    audit(&peer, route, AuditDecision::Allowed, request_id.as_deref());
+    let protocol = upgrade.protocol;
+    tokio::spawn(async move {
+        let Ok(upgraded) = on_upgrade.await else {
+            return;
+        };
+        let Ok(parts) = upgraded.downcast::<TokioIo<UnixStream>>() else {
+            return;
+        };
+        if !parts.read_buf.is_empty() {
+            return;
+        }
+        let Ok(stream) = parts.io.into_inner().into_std() else {
+            return;
+        };
+        if stream.set_nonblocking(false).is_err() {
+            return;
+        }
+        tokio::task::spawn_blocking(move || (upgrade.handler)(stream));
+    });
+    Ok(HttpResponse::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(CONNECTION, "upgrade")
+        .header(UPGRADE, protocol)
+        .body(Full::new(Bytes::new()))
+        .expect("static upgrade response must be valid"))
 }
 
 fn audit(
@@ -453,6 +597,10 @@ mod tests {
                     class: RequestClass::Mutation,
                     audit_action: AuditAction::MutateLifecycle,
                 }),
+                (&Method::POST, "/1.0/console") => Some(RouteSecurity {
+                    class: RequestClass::Console,
+                    audit_action: AuditAction::AttachConsole,
+                }),
                 _ => None,
             }
         }
@@ -466,6 +614,16 @@ mod tests {
                 },
             )
             .unwrap()
+        }
+
+        fn prepare_upgrade(
+            &self,
+            _request: LocalRequest,
+            _peer: &PeerIdentity,
+        ) -> Result<LocalUpgrade, ApiError> {
+            Ok(LocalUpgrade::new("test-binary-v1", |mut stream| {
+                stream.write_all(b"binary-ready").unwrap();
+            }))
         }
     }
 
@@ -576,6 +734,50 @@ mod tests {
         .await
         .unwrap();
         assert!(response.starts_with("HTTP/1.1 413 Payload Too Large"));
+
+        shutdown_tx.send(()).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn hands_an_authorized_http_upgrade_to_a_binary_stream() {
+        let directory = tempdir().unwrap();
+        let socket = directory.path().join("api.sock");
+        let server = LocalHttpServer::bind(
+            TransportConfig {
+                socket_path: socket.clone(),
+                socket_mode: 0o600,
+                max_request_bytes: 4,
+                max_header_bytes: 8192,
+            },
+            AuthorizationPolicy::deny_by_default()
+                .with_operator_uid(rustix::process::getuid().as_raw()),
+            ServiceLimiter::new(ServiceLimits {
+                connections: 1,
+                mutations: 1,
+                consoles: 1,
+            })
+            .unwrap(),
+            Arc::new(TestApi),
+        )
+        .unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let task = tokio::spawn(server.run(async move {
+            let _ = shutdown_rx.await;
+        }));
+        let response = tokio::task::spawn_blocking(move || {
+            let mut client = StdUnixStream::connect(socket).unwrap();
+            client
+                .write_all(b"POST /1.0/console HTTP/1.1\r\nHost: localhost\r\nConnection: upgrade\r\nUpgrade: test-binary-v1\r\n\r\n")
+                .unwrap();
+            let mut response = Vec::new();
+            client.read_to_end(&mut response).unwrap();
+            response
+        })
+        .await
+        .unwrap();
+        assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols"));
+        assert!(response.ends_with(b"binary-ready"));
 
         shutdown_tx.send(()).unwrap();
         task.await.unwrap().unwrap();
