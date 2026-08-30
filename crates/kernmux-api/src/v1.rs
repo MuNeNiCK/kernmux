@@ -181,6 +181,61 @@ pub struct MutationPrecondition {
     pub expected_generation: Generation,
 }
 
+/// Replaces the Multikernel CPU and memory resource pool.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ResourcePoolMutation {
+    pub expected_generation: Generation,
+    pub cpu_hardware_ids: Vec<u32>,
+    pub memory_bytes: u64,
+}
+
+/// Creates one peer-kernel instance from resources already in the pool.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CreateInstanceMutation {
+    pub expected_generation: Generation,
+    pub id: InstanceId,
+    pub name: String,
+    pub cpu_hardware_ids: Vec<u32>,
+    pub memory_bytes: u64,
+}
+
+/// Replaces selected resources of a ready instance.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct UpdateInstanceMutation {
+    pub expected_generation: Generation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_hardware_ids: Option<Vec<u32>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Loads a kernel and optional initrd into a ready instance.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LoadInstanceMutation {
+    pub expected_generation: Generation,
+    pub kernel_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initrd_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_line: Option<String>,
+}
+
+/// Applies a lifecycle transition to an existing instance.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct InstanceLifecycleMutation {
+    pub expected_generation: Generation,
+}
+
+/// Stops an active instance, optionally requesting a forced transition.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StopInstanceMutation {
+    pub expected_generation: Generation,
+    #[serde(default)]
+    pub force: bool,
+}
+
 /// One asynchronous host mutation.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Operation {
@@ -361,6 +416,14 @@ pub struct Event {
     pub resource: Option<ResourceReference>,
 }
 
+/// Bounded page of events after a client-provided cursor.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct EventPage {
+    pub events: Vec<Event>,
+    pub overflowed: bool,
+    pub latest_sequence: EventSequence,
+}
+
 impl Event {
     /// Returns true when this event directly follows `previous` without a gap
     /// and does not move the snapshot generation backwards.
@@ -514,6 +577,38 @@ mod tests {
         ] {
             round_trip(&reason);
         }
+    }
+
+    #[test]
+    fn mutation_contracts_round_trip_with_generation_preconditions() {
+        round_trip(&ResourcePoolMutation {
+            expected_generation: Generation(4),
+            cpu_hardware_ids: vec![4, 5],
+            memory_bytes: 2_147_483_648,
+        });
+        round_trip(&CreateInstanceMutation {
+            expected_generation: Generation(5),
+            id: InstanceId(1),
+            name: "lab".into(),
+            cpu_hardware_ids: vec![4],
+            memory_bytes: 1_073_741_824,
+        });
+        round_trip(&UpdateInstanceMutation {
+            expected_generation: Generation(6),
+            cpu_hardware_ids: Some(vec![4, 5]),
+            memory_bytes: None,
+            dry_run: false,
+        });
+        round_trip(&LoadInstanceMutation {
+            expected_generation: Generation(7),
+            kernel_path: "/var/lib/kernmux/images/vmlinux".into(),
+            initrd_path: Some("/var/lib/kernmux/images/initrd".into()),
+            command_line: Some("console=mktty0".into()),
+        });
+        round_trip(&StopInstanceMutation {
+            expected_generation: Generation(8),
+            force: false,
+        });
     }
 
     #[test]
