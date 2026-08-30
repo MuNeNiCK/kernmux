@@ -249,6 +249,15 @@ where
         Self { runner, snapshots }
     }
 
+    /// Refreshes host state without attempting a mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the snapshot backend error when no state can be produced.
+    pub fn refresh_snapshot(&mut self) -> Result<HostSnapshot, S::Error> {
+        self.snapshots.refresh_snapshot()
+    }
+
     /// Executes and reconciles one mutation.
     ///
     /// # Errors

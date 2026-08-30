@@ -49,9 +49,11 @@ impl MultikernelProbe {
             return Ok(ResourcePoolObservation::default());
         };
 
-        let cpu_hardware_ids = property_hardware_ids(resources.property("cpus"), "cpus")?;
-        let available_cpu_hardware_ids =
+        let mut cpu_hardware_ids = property_hardware_ids(resources.property("cpus"), "cpus")?;
+        cpu_hardware_ids.sort_unstable();
+        let mut available_cpu_hardware_ids =
             property_hardware_ids(resources.property("cpus-available"), "cpus-available")?;
+        available_cpu_hardware_ids.sort_unstable();
         let mut memory_regions = Vec::new();
         for node in resources
             .children()
@@ -109,15 +111,18 @@ impl MultikernelProbe {
             let tree = parse_fdt(&bytes, self.path(&device_tree_path))?;
             let resources = tree
                 .find_node(&format!("/{name}/resources"))
+                .or_else(|| tree.all_nodes().find(|node| node.name == "resources"))
                 .ok_or_else(|| {
                     InventoryError::invalid(&device_tree_path, "missing resources node")
                 })?;
+            let mut cpu_hardware_ids = property_hardware_ids(resources.property("cpus"), "cpus")?;
+            cpu_hardware_ids.sort_unstable();
             instances.push(InstanceObservation {
                 id,
                 name,
                 state,
                 resources: InstanceResourceObservation {
-                    cpu_hardware_ids: property_hardware_ids(resources.property("cpus"), "cpus")?,
+                    cpu_hardware_ids,
                     memory_base: property_u64(resources.property("memory-base"), "memory-base")?,
                     memory_bytes: property_u64(resources.property("memory-bytes"), "memory-bytes")?,
                 },

@@ -402,8 +402,9 @@ where
         };
         if let Some(current) = &self.current {
             let same_generation = assemble_snapshot(current.generation, &observations);
-            if &same_generation == current {
-                return Ok(current.clone());
+            if generation_relevant_state(&same_generation) == generation_relevant_state(current) {
+                self.current = Some(same_generation.clone());
+                return Ok(same_generation);
             }
             let next = Generation(current.generation.0.saturating_add(1));
             let snapshot = assemble_snapshot(next, &observations);
@@ -421,6 +422,14 @@ where
     pub fn current(&self) -> Option<&HostSnapshot> {
         self.current.as_ref()
     }
+}
+
+fn generation_relevant_state(snapshot: &HostSnapshot) -> HostSnapshot {
+    let mut normalized = snapshot.clone();
+    for node in &mut normalized.topology.numa_nodes {
+        node.available_memory_bytes = 0;
+    }
+    normalized
 }
 
 fn assemble_snapshot(generation: Generation, observed: &HostObservations) -> HostSnapshot {
@@ -715,6 +724,26 @@ mod tests {
         assert_eq!(changed.memory.assigned_bytes, 1_073_741_824);
         assert_eq!(changed.memory.total_bytes, 6_442_450_944);
         assert_eq!(changed.memory.host_reserved_bytes, 4_294_967_296);
+    }
+
+    #[test]
+    fn host_free_memory_does_not_change_configuration_generation() {
+        let first = observations(InstanceLifecycleState::Ready);
+        let mut second = first.clone();
+        second.linux.numa_nodes[0].available_memory_bytes = 536_870_912;
+        let source = SequenceSource {
+            observations: VecDeque::from([first, second]),
+        };
+        let mut inventory = InventoryService::new(source);
+
+        let before = inventory.refresh().unwrap();
+        let after = inventory.refresh().unwrap();
+
+        assert_eq!(after.generation, before.generation);
+        assert_ne!(
+            after.topology.numa_nodes[0].available_memory_bytes,
+            before.topology.numa_nodes[0].available_memory_bytes
+        );
     }
 
     #[test]
