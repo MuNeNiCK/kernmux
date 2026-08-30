@@ -15,6 +15,7 @@ publish = false
 license = "Apache-2.0"
 
 [workspace.dependencies]
+fdt = "=0.1.5"
 kernmux-api = { path = "crates/kernmux-api" }
 kernmux-core = { path = "crates/kernmux-core" }
 serde = { version = "=1.0.229", features = ["derive"] }

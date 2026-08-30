@@ -1,4 +1,5 @@
 use kernmux_core::host::{HostCapability, LinuxHostProbe};
+use kernmux_core::multikernel::MultikernelProbe;
 
 #[test]
 #[ignore = "requires a Multikernel Linux VM"]
@@ -25,5 +26,21 @@ fn observes_running_multikernel_host() {
         observed.numa_nodes.len(),
         observed.memory.total_bytes,
         observed.capabilities.iter().count()
+    );
+}
+
+#[test]
+#[ignore = "requires a Multikernel Linux VM"]
+fn observes_running_multikernel_inventory() {
+    let observed = MultikernelProbe::running_host()
+        .observe()
+        .expect("running Multikernel inventory must be observable");
+
+    println!(
+        "pool_cpus={} memory_regions={} instances={} transactions={}",
+        observed.pool.cpu_hardware_ids.len(),
+        observed.pool.memory_regions.len(),
+        observed.instances.len(),
+        observed.transactions.len()
     );
 }

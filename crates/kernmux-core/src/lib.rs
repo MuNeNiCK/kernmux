@@ -4,6 +4,7 @@
 pub const PRODUCT_NAME: &str = "Kernmux";
 
 pub mod host;
+pub mod multikernel;
 
 #[cfg(test)]
 mod tests {

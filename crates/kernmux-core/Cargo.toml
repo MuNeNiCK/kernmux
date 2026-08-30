@@ -9,5 +9,8 @@ license.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+fdt.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
