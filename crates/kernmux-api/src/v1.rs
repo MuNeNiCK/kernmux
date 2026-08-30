@@ -266,6 +266,43 @@ pub struct Actor {
     pub label: Option<String>,
 }
 
+/// Console features negotiated when a client attaches to an instance.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConsoleCapabilities {
+    /// Console payloads are transported without text transcoding.
+    pub binary: bool,
+    /// Whether terminal dimensions can be forwarded to the instance.
+    pub resize: bool,
+}
+
+/// Metadata returned before the binary console stream begins.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConsoleAttachment {
+    pub instance_id: InstanceId,
+    pub capabilities: ConsoleCapabilities,
+    pub max_frame_bytes: u32,
+}
+
+/// Terminal dimensions requested by an interactive client.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ConsoleSize {
+    pub columns: u16,
+    pub rows: u16,
+}
+
+/// Stable reason why a console stream became terminal.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleCloseReason {
+    ClientDetached,
+    EndOfStream,
+    InstanceStopped,
+    DeviceUnavailable,
+    TransportError,
+    #[serde(other)]
+    Unknown,
+}
+
 /// Result of an atomic resource transaction.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Transaction {
@@ -450,6 +487,32 @@ mod tests {
             OperationState::Unknown,
         ] {
             round_trip(&state);
+        }
+    }
+
+    #[test]
+    fn console_contract_round_trips_without_implying_resize_support() {
+        round_trip(&ConsoleAttachment {
+            instance_id: InstanceId(1),
+            capabilities: ConsoleCapabilities {
+                binary: true,
+                resize: false,
+            },
+            max_frame_bytes: 65_536,
+        });
+        round_trip(&ConsoleSize {
+            columns: 160,
+            rows: 48,
+        });
+        for reason in [
+            ConsoleCloseReason::ClientDetached,
+            ConsoleCloseReason::EndOfStream,
+            ConsoleCloseReason::InstanceStopped,
+            ConsoleCloseReason::DeviceUnavailable,
+            ConsoleCloseReason::TransportError,
+            ConsoleCloseReason::Unknown,
+        ] {
+            round_trip(&reason);
         }
     }
 
