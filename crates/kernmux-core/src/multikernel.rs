@@ -404,6 +404,9 @@ fn property_hardware_ids(
         return Ok(Vec::new());
     };
     let cells = property_cells(Some(property), name)?;
+    if cells.as_slice() == [0, 0] {
+        return Ok(Vec::new());
+    }
     if !cells.len().is_multiple_of(2) {
         return Err(InventoryError::invalid(
             "device_tree",
@@ -517,5 +520,18 @@ mod tests {
     #[test]
     fn rejects_unknown_lifecycle_state() {
         assert!(InstanceLifecycleState::parse("starting").is_err());
+    }
+
+    #[test]
+    fn normalizes_empty_cpu_pool_sentinel() {
+        let value = [0_u8; 8];
+        let property = NodeProperty {
+            name: "cpus",
+            value: &value,
+        };
+        assert_eq!(
+            property_hardware_ids(Some(property), "cpus").unwrap(),
+            Vec::<u32>::new()
+        );
     }
 }
