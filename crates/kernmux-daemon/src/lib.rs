@@ -7,3 +7,4 @@ pub mod lifecycle_executor;
 pub mod operations;
 pub mod resource_pool;
 pub mod scheduler;
+pub mod security;

@@ -95,6 +95,7 @@ version = "0.1.0"
 dependencies = [
  "kernmux-api",
  "kernmux-core",
+ "rustix",
  "serde",
  "serde_json",
  "tempfile",
