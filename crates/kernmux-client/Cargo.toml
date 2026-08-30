@@ -1,5 +1,5 @@
 [package]
-name = "kernmux-cli"
+name = "kernmux-client"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,13 +9,8 @@ license.workspace = true
 [lints]
 workspace = true
 
-[[bin]]
-name = "kernmuxctl"
-path = "src/main.rs"
-
 [dependencies]
 kernmux-api.workspace = true
-kernmux-client.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

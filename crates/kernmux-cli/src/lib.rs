@@ -5,11 +5,9 @@ mod diagnostics;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
-    io::{Read, Write},
-    os::unix::net::UnixStream,
+    io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
 };
 
 use kernmux_api::v1::{
@@ -17,13 +15,13 @@ use kernmux_api::v1::{
     InstanceLifecycleMutation, LoadInstanceMutation, LoadManagedImageMutation,
     ResourcePoolMutation, StopInstanceMutation, UpdateInstanceMutation,
 };
+use kernmux_client::{
+    ErrorKind as ClientErrorKind, Request as ClientRequest, Transport, UnixTransport,
+};
 use serde::Serialize;
 use serde_json::Value;
 
 const DEFAULT_SOCKET: &str = "/run/kernmux/kernmuxd.sock";
-const MAX_RESPONSE_HEADER_BYTES: usize = 32 * 1024;
-const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
-const IO_TIMEOUT: Duration = Duration::from_secs(30);
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 /// Stable process exit categories for scripts.
@@ -624,164 +622,29 @@ fn send_request(
     request_id: &str,
     request: &ApiRequest,
 ) -> Result<ApiResponse, CliError> {
-    let mut stream = UnixStream::connect(socket).map_err(|error| {
-        CliError::transport(format!(
-            "failed to connect to {}: {error}",
-            socket.display()
-        ))
-    })?;
-    stream
-        .set_read_timeout(Some(IO_TIMEOUT))
-        .map_err(|error| CliError::transport(error.to_string()))?;
-    stream
-        .set_write_timeout(Some(IO_TIMEOUT))
-        .map_err(|error| CliError::transport(error.to_string()))?;
-    let headers = format!(
-        "{} {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Request-Id: {}\r\n\r\n",
-        request.method,
-        request.path,
-        request.body.len(),
-        request_id,
-    );
-    stream
-        .write_all(headers.as_bytes())
-        .and_then(|()| stream.write_all(&request.body))
-        .map_err(|error| CliError::transport(format!("failed to send request: {error}")))?;
-    read_response(&mut stream)
+    UnixTransport::new(socket)
+        .execute(
+            request_id,
+            &ClientRequest {
+                method: request.method,
+                path: request.path.clone(),
+                body: request.body.clone(),
+            },
+        )
+        .map(|response| ApiResponse {
+            status: response.status,
+            value: response.value,
+        })
+        .map_err(|error| match error.kind {
+            ClientErrorKind::Transport => CliError::transport(error.message),
+            _ => CliError::protocol(error.message),
+        })
 }
 
 #[derive(Debug)]
 struct ApiResponse {
     status: u16,
     value: Value,
-}
-
-fn read_response(stream: &mut impl Read) -> Result<ApiResponse, CliError> {
-    let mut received = Vec::new();
-    let header_end = loop {
-        if let Some(position) = received.windows(4).position(|window| window == b"\r\n\r\n") {
-            break position + 4;
-        }
-        if received.len() >= MAX_RESPONSE_HEADER_BYTES {
-            return Err(CliError::protocol("response headers exceed their limit"));
-        }
-        let mut chunk = [0_u8; 4096];
-        let read = stream
-            .read(&mut chunk)
-            .map_err(|error| CliError::transport(format!("failed to read response: {error}")))?;
-        if read == 0 {
-            return Err(CliError::protocol("response ended before its headers"));
-        }
-        received.extend_from_slice(&chunk[..read]);
-    };
-    if header_end > MAX_RESPONSE_HEADER_BYTES {
-        return Err(CliError::protocol("response headers exceed their limit"));
-    }
-    let head = parse_response_head(&received[..header_end - 4])?;
-    let length = head.content_length;
-    if length > MAX_RESPONSE_BODY_BYTES {
-        return Err(CliError::protocol("response body exceeds its limit"));
-    }
-    let mut body = received.split_off(header_end);
-    if body.len() > length {
-        return Err(CliError::protocol(
-            "response contains bytes beyond its declared body",
-        ));
-    }
-    let received_body_bytes = body.len();
-    body.resize(length, 0);
-    if let Err(error) = stream.read_exact(&mut body[received_body_bytes..]) {
-        return Err(if error.kind() == std::io::ErrorKind::UnexpectedEof {
-            CliError::protocol("response ended before its declared body")
-        } else {
-            CliError::transport(format!("failed to read response body: {error}"))
-        });
-    }
-    let mut extra = [0_u8; 1];
-    match stream.read(&mut extra) {
-        Ok(0) => {}
-        Ok(_) => {
-            return Err(CliError::protocol(
-                "response contains bytes beyond its declared body",
-            ));
-        }
-        Err(error) => {
-            return Err(CliError::transport(format!(
-                "failed to finish response: {error}"
-            )));
-        }
-    }
-    let value = serde_json::from_slice::<Value>(&body)
-        .map_err(|_| CliError::protocol("response body is not valid JSON"))?;
-    Ok(ApiResponse {
-        status: head.status,
-        value,
-    })
-}
-
-struct ResponseHead {
-    status: u16,
-    content_length: usize,
-}
-
-fn parse_response_head(bytes: &[u8]) -> Result<ResponseHead, CliError> {
-    let header_text = std::str::from_utf8(bytes)
-        .map_err(|_| CliError::protocol("response headers are not valid UTF-8"))?;
-    let mut lines = header_text.split("\r\n");
-    let status = lines
-        .next()
-        .and_then(|line| {
-            let mut fields = line.split_whitespace();
-            (fields.next() == Some("HTTP/1.1"))
-                .then(|| fields.next())?
-                .and_then(|value| value.parse::<u16>().ok())
-        })
-        .ok_or_else(|| CliError::protocol("response status line is invalid"))?;
-    if status == 101 {
-        return Err(CliError::protocol("unexpected protocol upgrade"));
-    }
-    let mut content_length = None;
-    let mut content_type_is_json = None;
-    for line in lines {
-        let (name, value) = line
-            .split_once(':')
-            .ok_or_else(|| CliError::protocol("response header is invalid"))?;
-        if name.eq_ignore_ascii_case("transfer-encoding") {
-            return Err(CliError::protocol("chunked responses are not supported"));
-        }
-        if name.eq_ignore_ascii_case("content-length") {
-            if content_length.is_some() {
-                return Err(CliError::protocol("response has duplicate content length"));
-            }
-            content_length = Some(
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|_| CliError::protocol("response content length is invalid"))?,
-            );
-        }
-        if name.eq_ignore_ascii_case("content-type") {
-            if content_type_is_json.is_some() {
-                return Err(CliError::protocol("response has duplicate content type"));
-            }
-            content_type_is_json =
-                Some(
-                    value.trim().split(';').next().is_some_and(|media_type| {
-                        media_type.eq_ignore_ascii_case("application/json")
-                    }),
-                );
-        }
-    }
-    if content_type_is_json != Some(true) {
-        return Err(CliError::protocol(
-            "response content type is not application/json",
-        ));
-    }
-    Ok(ResponseHead {
-        status,
-        content_length: content_length
-            .ok_or_else(|| CliError::protocol("response content length is missing"))?,
-    })
 }
 
 fn response_exit_code(status: u16, value: &Value) -> Result<ExitCode, CliError> {
@@ -1005,7 +868,6 @@ Default socket: {DEFAULT_SOCKET}"
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     #[test]
     fn parses_host_preflight_as_a_read_only_versioned_request() {
@@ -1214,71 +1076,6 @@ mod tests {
             .unwrap(),
             ExitCode::Service
         );
-    }
-
-    #[test]
-    fn accepts_one_complete_json_response() {
-        let body = br#"{"kind":"result","generation":3,"data":[]}"#;
-        let mut response = response(body, "application/json; charset=utf-8");
-        let parsed = read_response(&mut response).unwrap();
-        assert_eq!(parsed.status, 200);
-        assert_eq!(parsed.value["generation"], 3);
-    }
-
-    #[test]
-    fn rejects_ambiguous_or_incomplete_response_framing() {
-        let body = br#"{"kind":"result"}"#;
-
-        let mut truncated = response(body, "application/json").into_inner();
-        truncated.pop();
-        assert_eq!(
-            read_response(&mut Cursor::new(truncated)).unwrap_err().code,
-            ExitCode::Protocol
-        );
-
-        let mut trailing = response(body, "application/json").into_inner();
-        trailing.push(b'x');
-        assert_eq!(
-            read_response(&mut Cursor::new(trailing)).unwrap_err().code,
-            ExitCode::Protocol
-        );
-
-        let duplicate_type = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
-            body.len()
-        )
-        .into_bytes();
-        let mut duplicate_type = Cursor::new([duplicate_type, body.to_vec()].concat());
-        assert_eq!(
-            read_response(&mut duplicate_type).unwrap_err().code,
-            ExitCode::Protocol
-        );
-    }
-
-    #[test]
-    fn rejects_unsupported_http_response_shapes() {
-        let mut wrong_type = response(br"{}", "text/plain");
-        assert_eq!(
-            read_response(&mut wrong_type).unwrap_err().code,
-            ExitCode::Protocol
-        );
-
-        let mut chunked = Cursor::new(
-            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n"
-                .to_vec(),
-        );
-        assert_eq!(
-            read_response(&mut chunked).unwrap_err().code,
-            ExitCode::Protocol
-        );
-    }
-
-    fn response(body: &[u8], content_type: &str) -> Cursor<Vec<u8>> {
-        let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
-            body.len()
-        );
-        Cursor::new([head.into_bytes(), body.to_vec()].concat())
     }
 
     fn strings(values: &[&str]) -> Vec<String> {

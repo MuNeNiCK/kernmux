@@ -324,6 +324,17 @@ name = "kernmux-cli"
 version = "0.1.0"
 dependencies = [
  "kernmux-api",
+ "kernmux-client",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "kernmux-client"
+version = "0.1.0"
+dependencies = [
+ "kernmux-api",
  "serde",
  "serde_json",
  "tempfile",
