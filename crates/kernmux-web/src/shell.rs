@@ -19,7 +19,7 @@ use gpui_component::{
 };
 use kernmux_api::v1::{
     Generation, ImageArtifact, ImageKind, Instance, InstanceId, InstanceState, Operation,
-    OperationState, SnapshotHealth,
+    OperationKind, OperationState, ResourceKind, SnapshotHealth,
 };
 use kernmux_ui_model::{
     DataState, Intent, ManagementModel, ManagementSnapshot, Section, parse_cpu_hardware_ids,
@@ -40,6 +40,7 @@ enum SetupPanel {
     Instance,
     Image,
     LoadImage(InstanceId),
+    DeleteInstance(InstanceId),
 }
 
 struct ManagementShell {
@@ -59,6 +60,7 @@ struct ManagementShell {
     load_kernel_id: Entity<InputState>,
     load_initrd_id: Entity<InputState>,
     load_command_line: Entity<InputState>,
+    recent_tasks_collapsed: bool,
 }
 
 #[allow(
@@ -109,6 +111,7 @@ impl ManagementShell {
                     .placeholder("Kernel command line")
                     .default_value("console=mktty0")
             }),
+            recent_tasks_collapsed: false,
         };
         shell.refresh(window, cx);
         shell
@@ -169,107 +172,172 @@ impl ManagementShell {
     }
 
     fn navigation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let instances = match self.model.data() {
+            DataState::Ready(snapshot) => snapshot
+                .host
+                .instances
+                .iter()
+                .map(|instance| (instance.id, instance.name.clone()))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        let selected = self.model.selected_instance();
+        let instance_count = instances.len();
+        let instance_items = instances
+            .into_iter()
+            .map(|(id, name)| {
+                let monitor = SidebarMenuItem::new("Monitor")
+                    .icon(IconName::ChartPie)
+                    .active(this_section_is_instance_monitor(
+                        self.model.section(),
+                        selected,
+                        id,
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.model.select_instance(Some(id));
+                        this.model.navigate(Section::Operations);
+                        cx.notify();
+                    }));
+                SidebarMenuItem::new(name)
+                    .icon(IconName::Frame)
+                    .active(selected == Some(id) && self.model.section() == Section::Instances)
+                    .default_open(selected == Some(id))
+                    .click_to_open(true)
+                    .children([monitor])
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.model.navigate(Section::Instances);
+                        this.model.select_instance(Some(id));
+                        cx.notify();
+                    }))
+            })
+            .collect::<Vec<_>>();
+
         Sidebar::new("host-navigation")
             .w(px(244.))
             .h_full()
             .border_0()
             .header(
-                v_flex()
+                SidebarHeader::new()
                     .w_full()
-                    .gap_5()
-                    .child(
-                        SidebarHeader::new()
-                            .w_full()
-                            .child(
-                                div()
-                                    .size_9()
-                                    .rounded(cx.theme().radius_lg)
-                                    .bg(cx.theme().primary)
-                                    .text_color(cx.theme().primary_foreground)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .font_semibold()
-                                    .child("K"),
-                            )
-                            .child(
-                                v_flex()
-                                    .gap_0()
-                                    .child(div().font_semibold().child("Kernmux"))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child("Host management"),
-                                    ),
-                            ),
-                    )
-                    .child(self.host_identity(cx)),
-            )
-            .child(
-                SidebarMenu::new().children(Section::ALL.into_iter().map(|section| {
-                    SidebarMenuItem::new(section.label())
-                        .icon(section_icon(section))
-                        .active(self.model.section() == section)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.model.navigate(section);
-                            cx.notify();
-                        }))
-                })),
-            )
-    }
-
-    fn host_identity(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (status, detail, healthy) = match self.model.data() {
-            DataState::Loading => ("Connecting", "Reading host inventory".to_owned(), false),
-            DataState::Failed(_) => ("Unavailable", "Gateway connection failed".to_owned(), false),
-            DataState::Ready(snapshot) => (
-                if snapshot.host.health == SnapshotHealth::Healthy {
-                    "Online"
-                } else {
-                    "Attention"
-                },
-                snapshot.host.kernel.release.clone(),
-                snapshot.host.health == SnapshotHealth::Healthy,
-            ),
-        };
-        v_flex()
-            .w_full()
-            .gap_2()
-            .p_3()
-            .rounded(cx.theme().radius_lg)
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().secondary.opacity(0.18))
-            .child(
-                h_flex()
-                    .justify_between()
                     .child(
                         div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("CONTROL HOST"),
+                            .size_8()
+                            .rounded(cx.theme().radius)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .font_semibold()
+                            .child("K"),
                     )
-                    .child(if healthy {
-                        Tag::success().small().outline().child(status)
-                    } else {
-                        Tag::warning().small().outline().child(status)
-                    }),
+                    .child(
+                        v_flex()
+                            .gap_0()
+                            .child(div().font_semibold().child("Kernmux"))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Navigator"),
+                            ),
+                    ),
             )
-            .child(div().text_sm().font_medium().child(detail))
+            .child(
+                SidebarMenu::new()
+                    .child(
+                        SidebarMenuItem::new("Host")
+                            .icon(IconName::LayoutDashboard)
+                            .active(self.model.section() == Section::Overview)
+                            .default_open(true)
+                            .children([
+                                SidebarMenuItem::new("Manage")
+                                    .icon(IconName::Cpu)
+                                    .active(self.model.section() == Section::Resources)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.model.select_instance(None);
+                                        this.model.navigate(Section::Resources);
+                                        cx.notify();
+                                    })),
+                                SidebarMenuItem::new("Monitor")
+                                    .icon(IconName::ChartPie)
+                                    .active(
+                                        self.model.section() == Section::Operations
+                                            && self.model.selected_instance().is_none(),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.model.select_instance(None);
+                                        this.model.navigate(Section::Operations);
+                                        cx.notify();
+                                    })),
+                            ])
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.model.select_instance(None);
+                                this.model.navigate(Section::Overview);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        SidebarMenuItem::new(format!("Instances  {instance_count}"))
+                            .icon(IconName::Frame)
+                            .active(
+                                self.model.section() == Section::Instances
+                                    && self.model.selected_instance().is_none(),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.model.select_instance(None);
+                                this.model.navigate(Section::Instances);
+                                cx.notify();
+                            }))
+                            .default_open(true)
+                            .children(instance_items),
+                    )
+                    .child(
+                        SidebarMenuItem::new("Images")
+                            .icon(IconName::HardDrive)
+                            .active(self.model.section() == Section::Images)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.model.select_instance(None);
+                                this.model.navigate(Section::Images);
+                                cx.notify();
+                            })),
+                    ),
+            )
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let section = self.model.section();
-        let generation = match self.model.data() {
-            DataState::Ready(snapshot) => Some(snapshot.host.generation.0),
+        let selected_instance = match (self.model.data(), self.model.selected_instance()) {
+            (DataState::Ready(snapshot), Some(id)) => snapshot
+                .host
+                .instances
+                .iter()
+                .find(|instance| instance.id == id),
             _ => None,
         };
+        let (title, detail) = selected_instance.map_or_else(
+            || {
+                (
+                    section.label().to_owned(),
+                    section_description(section).to_owned(),
+                )
+            },
+            |instance| {
+                (
+                    instance.name.clone(),
+                    format!(
+                        "Instance {} · {}",
+                        instance.id.0,
+                        instance_state_label(instance.state)
+                    ),
+                )
+            },
+        );
         h_flex()
             .w_full()
-            .min_h(px(76.))
+            .min_h(px(64.))
             .px_6()
-            .py_4()
+            .py_3()
             .gap_4()
             .justify_between()
             .border_b_1()
@@ -277,31 +345,15 @@ impl ManagementShell {
             .child(
                 v_flex()
                     .gap_1()
-                    .child(div().text_xl().font_semibold().child(section.label()))
+                    .child(div().text_xl().font_semibold().child(title))
                     .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(section_description(section)),
+                            .child(detail),
                     ),
             )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .children(generation.map(|value| {
-                        Tag::secondary()
-                            .outline()
-                            .child(format!("Generation {value}"))
-                    }))
-                    .child(
-                        Button::new("refresh-host")
-                            .outline()
-                            .label("Refresh")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.refresh(window, cx);
-                            })),
-                    ),
-            )
+            .children(selected_instance.map(|instance| instance_tag(instance.state)))
     }
 
     fn content(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -313,7 +365,13 @@ impl ManagementShell {
                 Section::Resources => self.resources(snapshot, cx).into_any_element(),
                 Section::Instances => self.instances(snapshot, cx).into_any_element(),
                 Section::Images => self.images(snapshot, cx).into_any_element(),
-                Section::Operations => self.operations(snapshot, cx).into_any_element(),
+                Section::Operations => {
+                    if let Some(id) = self.model.selected_instance() {
+                        self.instance_monitor(snapshot, id, cx).into_any_element()
+                    } else {
+                        self.operations(snapshot, cx).into_any_element()
+                    }
+                }
             },
         };
         v_flex()
@@ -504,6 +562,26 @@ impl ManagementShell {
                     .into_any_element(),
                 "Load image",
             ),
+            SetupPanel::DeleteInstance(id) => (
+                "Delete instance",
+                "Permanently remove this instance from the host inventory.",
+                v_flex()
+                    .gap_3()
+                    .child(
+                        Alert::warning(
+                            "confirm-delete-instance",
+                            "The instance must be ready. This operation cannot be undone.",
+                        )
+                        .title(format!("Delete instance {}?", id.0)),
+                    )
+                    .child(
+                        Tag::secondary()
+                            .outline()
+                            .child(format!("Resolved target: instance {}", id.0)),
+                    )
+                    .into_any_element(),
+                "Delete instance",
+            ),
         };
 
         card(cx)
@@ -614,6 +692,10 @@ impl ManagementShell {
                     command_line: (!command_line.is_empty()).then_some(command_line),
                 })
             }
+            SetupPanel::DeleteInstance(id) => Ok(Intent::DeleteInstance {
+                id,
+                expected_generation: generation,
+            }),
         }
     }
 
@@ -624,46 +706,103 @@ impl ManagementShell {
             .iter()
             .filter(|item| item.state == InstanceState::Active)
             .count();
+        let logical_cpus = host.topology.cpus.len()
+            + host
+                .resource_pool
+                .cpu_hardware_ids
+                .iter()
+                .filter(|id| !host.topology.cpus.iter().any(|cpu| cpu.hardware_id == **id))
+                .count();
+        let delegated_cpus = host.resource_pool.cpu_hardware_ids.len();
         v_flex()
             .w_full()
-            .gap_5()
+            .gap_4()
             .child(
-                div()
-                    .grid()
-                    .grid_cols(4)
-                    .gap_4()
-                    .child(metric_card(
-                        "Logical CPUs",
-                        host.topology.cpus.len(),
-                        "Online topology",
-                        cx,
-                    ))
-                    .child(metric_card(
-                        "Instances",
-                        host.instances.len(),
-                        &format!("{active} active"),
-                        cx,
-                    ))
-                    .child(metric_card(
-                        "NUMA nodes",
-                        host.topology.numa_nodes.len(),
-                        &host.topology.architecture,
-                        cx,
-                    ))
-                    .child(metric_card(
-                        "Verified images",
-                        snapshot.images.len(),
-                        "Content addressed",
-                        cx,
-                    )),
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("configure-host")
+                            .primary()
+                            .label("Configure resource pool")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.setup = Some(SetupPanel::ResourcePool);
+                                this.action_error = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("refresh-host-summary")
+                            .outline()
+                            .label("Refresh")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.refresh(window, cx);
+                            })),
+                    ),
             )
             .child(
                 div()
                     .grid()
                     .grid_cols(2)
                     .gap_4()
-                    .child(memory_card(snapshot, cx))
-                    .child(host_card(snapshot, cx)),
+                    .child(
+                        summary_panel("Host", cx)
+                            .child(detail_line("Kernel", host.kernel.release.clone(), cx))
+                            .child(detail_line(
+                                "Architecture",
+                                host.topology.architecture.clone(),
+                                cx,
+                            ))
+                            .child(detail_line(
+                                "Instances",
+                                format!("{} registered · {active} active", host.instances.len()),
+                                cx,
+                            ))
+                            .child(
+                                h_flex()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Multikernel"),
+                                    )
+                                    .child(if host.kernel.multikernel_enabled {
+                                        Tag::success().outline().child("Enabled")
+                                    } else {
+                                        Tag::danger().outline().child("Disabled")
+                                    }),
+                            ),
+                    )
+                    .child(
+                        summary_panel("Resource allocation", cx)
+                            .child(detail_line(
+                                "CPU",
+                                format!("{delegated_cpus} delegated of {logical_cpus}"),
+                                cx,
+                            ))
+                            .child(
+                                Progress::new("host-cpu-allocation")
+                                    .value(percent_usize(delegated_cpus, logical_cpus))
+                                    .accessibility_label("CPUs delegated to peer kernels"),
+                            )
+                            .child(detail_line(
+                                "Memory",
+                                format!(
+                                    "{} assigned of {}",
+                                    bytes(host.memory.assigned_bytes),
+                                    bytes(host.memory.assignable_bytes)
+                                ),
+                                cx,
+                            ))
+                            .child(
+                                Progress::new("host-memory-allocation")
+                                    .value(percent(
+                                        host.memory.assigned_bytes,
+                                        host.memory.assignable_bytes,
+                                    ))
+                                    .accessibility_label("Memory assigned to peer kernels"),
+                            ),
+                    ),
             )
             .children((host.health != SnapshotHealth::Healthy).then(|| {
                 Alert::warning(
@@ -672,6 +811,38 @@ impl ManagementShell {
                 )
                 .title("Host state needs attention")
             }))
+            .child(
+                summary_section("Hardware", cx)
+                    .child(detail_line("Logical CPUs", logical_cpus.to_string(), cx))
+                    .child(detail_line(
+                        "NUMA nodes",
+                        host.topology.numa_nodes.len().to_string(),
+                        cx,
+                    ))
+                    .child(detail_line(
+                        "Physical memory",
+                        bytes(host.memory.total_bytes),
+                        cx,
+                    ))
+                    .child(detail_line(
+                        "Control-kernel reservation",
+                        bytes(host.memory.host_reserved_bytes),
+                        cx,
+                    )),
+            )
+            .child(
+                summary_section("Configuration", cx)
+                    .child(detail_line(
+                        "Verified images",
+                        snapshot.images.len().to_string(),
+                        cx,
+                    ))
+                    .child(detail_line(
+                        "Capabilities",
+                        host.capabilities.len().to_string(),
+                        cx,
+                    )),
+            )
     }
 
     fn resources(&self, snapshot: &ManagementSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
@@ -848,36 +1019,61 @@ impl ManagementShell {
             )
     }
 
-    fn instances(&self, snapshot: &ManagementSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
+    fn instances(&self, snapshot: &ManagementSnapshot, cx: &mut Context<Self>) -> gpui::Div {
+        if let Some(instance) = self.model.selected_instance().and_then(|id| {
+            snapshot
+                .host
+                .instances
+                .iter()
+                .find(|instance| instance.id == id)
+        }) {
+            return self.instance_summary(snapshot, instance, cx);
+        }
+
         let generation = snapshot.host.generation;
         let empty = snapshot.host.instances.is_empty();
         v_flex()
             .w_full()
-            .gap_3()
+            .gap_0()
+            .border_1()
+            .border_color(cx.theme().border)
             .child(
                 h_flex()
+                    .min_h(px(52.))
+                    .px_3()
+                    .gap_2()
                     .justify_between()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("new-instance")
+                                    .primary()
+                                    .icon(IconName::Plus)
+                                    .label("Create / Register instance")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.setup = Some(SetupPanel::Instance);
+                                        this.action_error = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("refresh-instances")
+                                    .outline()
+                                    .label("Refresh")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.refresh(window, cx);
+                                    })),
+                            ),
+                    )
                     .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{} managed peer kernels",
-                                snapshot.host.instances.len()
-                            )),
-                    )
-                    .child(
-                        Button::new("new-instance")
-                            .primary()
-                            .icon(IconName::Plus)
-                            .label("New instance")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.setup = Some(SetupPanel::Instance);
-                                this.action_error = None;
-                                cx.notify();
-                            })),
+                            .child(format!("{} instances", snapshot.host.instances.len())),
                     ),
             )
+            .child(instance_table_header(cx))
             .children(
                 snapshot
                     .host
@@ -897,86 +1093,131 @@ impl ManagementShell {
     fn instance_row(
         &self,
         instance: &Instance,
-        generation: Generation,
+        _generation: Generation,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let id = instance.id;
+        h_flex()
+            .id(("instance-row", id.0 as usize))
+            .w_full()
+            .min_h(px(46.))
+            .items_center()
+            .px_3()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .cursor_pointer()
+            .hover(|style| style.bg(cx.theme().secondary.opacity(0.35)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.model.navigate(Section::Instances);
+                this.model.select_instance(Some(id));
+                cx.notify();
+            }))
+            .child(
+                h_flex()
+                    .w(px(260.))
+                    .gap_2()
+                    .min_w_0()
+                    .child(Icon::new(IconName::Frame))
+                    .child(div().font_medium().child(instance.name.clone())),
+            )
+            .child(div().w(px(140.)).pr_4().child(instance_tag(instance.state)))
+            .child(
+                div()
+                    .w(px(90.))
+                    .text_sm()
+                    .child(instance.resources.cpu_hardware_ids.len().to_string()),
+            )
+            .child(
+                div()
+                    .w(px(130.))
+                    .text_sm()
+                    .child(bytes(instance.resources.memory_bytes)),
+            )
+            .child(div().flex_1().text_sm().child(if instance.image.present {
+                "Loaded"
+            } else {
+                "Not loaded"
+            }))
+            .child(
+                div()
+                    .w(px(72.))
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(instance.id.0.to_string()),
+            )
+    }
+
+    fn instance_summary(
+        &self,
+        snapshot: &ManagementSnapshot,
+        instance: &Instance,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
-        let action = match instance.state {
+        let generation = snapshot.host.generation;
+        let id = instance.id;
+        let lifecycle = match instance.state {
             InstanceState::Loaded => Some((
                 "Start",
-                IconName::Play,
                 Intent::StartInstance {
-                    id: instance.id,
+                    id,
                     expected_generation: generation,
                 },
             )),
             InstanceState::Active => Some((
                 "Stop",
-                IconName::SquareTerminal,
                 Intent::StopInstance {
-                    id: instance.id,
+                    id,
                     expected_generation: generation,
                     force: false,
                 },
             )),
-            InstanceState::Ready => Some((
-                "Delete",
-                IconName::Delete,
-                Intent::DeleteInstance {
-                    id: instance.id,
-                    expected_generation: generation,
-                },
-            )),
-            InstanceState::Absent | InstanceState::Unknown => None,
+            _ => None,
         };
-        card(cx)
-            .flex_row()
-            .items_center()
-            .justify_between()
+        let assigned_memory = instance.resources.memory_bytes;
+        let pool_memory = snapshot
+            .host
+            .resource_pool
+            .memory_regions
+            .iter()
+            .map(|region| region.bytes)
+            .sum::<u64>();
+
+        v_flex()
+            .w_full()
             .gap_4()
             .child(
                 h_flex()
-                    .gap_4()
-                    .min_w_0()
+                    .w_full()
+                    .gap_2()
                     .child(
-                        div()
-                            .size_10()
-                            .rounded(cx.theme().radius_lg)
-                            .bg(cx.theme().secondary)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(Icon::new(IconName::Frame)),
+                        Button::new(("console", id.0 as usize))
+                            .outline()
+                            .icon(IconName::SquareTerminal)
+                            .label("Console")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.dispatch(Intent::OpenConsole(id), window, cx);
+                            })),
                     )
                     .child(
-                        v_flex()
-                            .gap_1()
-                            .min_w_0()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .child(div().font_semibold().child(instance.name.clone()))
-                                    .child(instance_tag(instance.state)),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
-                                        "ID {} · {} CPUs · {} memory · {} devices",
-                                        instance.id.0,
-                                        instance.resources.cpu_hardware_ids.len(),
-                                        bytes(instance.resources.memory_bytes),
-                                        instance.resources.device_ids.len()
-                                    )),
-                            ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
+                        Button::new(("monitor", id.0 as usize))
+                            .outline()
+                            .label("Monitor")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.model.select_instance(Some(id));
+                                this.model.navigate(Section::Operations);
+                                cx.notify();
+                            })),
+                    )
+                    .children(lifecycle.map(|(label, intent)| {
+                        Button::new(("lifecycle", id.0 as usize))
+                            .primary()
+                            .label(label)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.dispatch(intent.clone(), window, cx);
+                            }))
+                    }))
                     .children((instance.state == InstanceState::Ready).then(|| {
-                        let id = instance.id;
-                        Button::new(("load-instance", id.0 as usize))
+                        Button::new(("load-image", id.0 as usize))
                             .primary()
                             .label("Load image")
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -985,27 +1226,168 @@ impl ManagementShell {
                                 cx.notify();
                             }))
                     }))
+                    .children((instance.state == InstanceState::Ready).then(|| {
+                        Button::new(("instance-actions", id.0 as usize))
+                            .outline()
+                            .label("Actions")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.setup = Some(SetupPanel::DeleteInstance(id));
+                                this.action_error = None;
+                                cx.notify();
+                            }))
+                    }))
                     .children((instance.state == InstanceState::Loaded).then(|| {
                         let intent = Intent::UnloadInstance {
-                            id: instance.id,
+                            id,
                             expected_generation: generation,
                         };
-                        Button::new(("unload-instance", instance.id.0 as usize))
+                        Button::new(("unload", id.0 as usize))
                             .outline()
                             .label("Unload")
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.dispatch(intent.clone(), window, cx);
                             }))
                     }))
-                    .children(action.map(|(label, icon, intent)| {
-                        Button::new(("instance-action", instance.id.0 as usize))
+                    .child(
+                        Button::new(("refresh-instance", id.0 as usize))
                             .outline()
-                            .icon(icon)
-                            .label(label)
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.dispatch(intent.clone(), window, cx);
-                            }))
-                    })),
+                            .label("Refresh")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.refresh(window, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .grid()
+                    .grid_cols(3)
+                    .gap_4()
+                    .child(
+                        v_flex()
+                            .min_h(px(190.))
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .items_center()
+                            .justify_center()
+                            .gap_3()
+                            .child(Icon::new(IconName::SquareTerminal).size_8())
+                            .child(div().font_medium().child("MKTTY console"))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(if instance.state == InstanceState::Active {
+                                        "Open the console to attach"
+                                    } else {
+                                        "Console is available while active"
+                                    }),
+                            ),
+                    )
+                    .child(
+                        summary_panel("Instance", cx)
+                            .child(detail_line("Name", instance.name.clone(), cx))
+                            .child(detail_line(
+                                "State",
+                                instance_state_label(instance.state),
+                                cx,
+                            ))
+                            .child(detail_line("ID", instance.id.0.to_string(), cx))
+                            .child(detail_line(
+                                "Kernel image",
+                                if instance.image.present {
+                                    "Loaded"
+                                } else {
+                                    "Not loaded"
+                                }
+                                .to_owned(),
+                                cx,
+                            )),
+                    )
+                    .child(
+                        summary_panel("Assigned resources", cx)
+                            .child(detail_line(
+                                "CPU",
+                                format!(
+                                    "{} logical CPUs",
+                                    instance.resources.cpu_hardware_ids.len()
+                                ),
+                                cx,
+                            ))
+                            .child(detail_line("Memory", bytes(assigned_memory), cx))
+                            .child(
+                                Progress::new(("instance-memory", id.0 as usize))
+                                    .value(percent(assigned_memory, pool_memory))
+                                    .accessibility_label("Instance share of resource-pool memory"),
+                            )
+                            .child(detail_line(
+                                "Devices",
+                                instance.resources.device_ids.len().to_string(),
+                                cx,
+                            )),
+                    ),
+            )
+            .child(
+                summary_section("General Information", cx)
+                    .child(detail_line(
+                        "Lifecycle state",
+                        instance_state_label(instance.state),
+                        cx,
+                    ))
+                    .child(detail_line(
+                        "Image state",
+                        if instance.image.present {
+                            "Present"
+                        } else {
+                            "Not loaded"
+                        }
+                        .to_owned(),
+                        cx,
+                    )),
+            )
+            .child(
+                summary_section("Performance summary — last hour", cx).child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(
+                            "Historical CPU and memory telemetry is not available from this host.",
+                        ),
+                ),
+            )
+            .child(
+                summary_section("Hardware Configuration", cx)
+                    .child(detail_line(
+                        "CPU hardware IDs",
+                        hardware_ids(&instance.resources.cpu_hardware_ids),
+                        cx,
+                    ))
+                    .child(detail_line(
+                        "Memory",
+                        bytes(instance.resources.memory_bytes),
+                        cx,
+                    ))
+                    .child(detail_line(
+                        "Device assignments",
+                        if instance.resources.device_ids.is_empty() {
+                            "None".to_owned()
+                        } else {
+                            instance.resources.device_ids.join(", ")
+                        },
+                        cx,
+                    )),
+            )
+            .child(
+                summary_section("Resource Consumption", cx)
+                    .child(detail_line(
+                        "Assigned host memory",
+                        bytes(instance.resources.memory_bytes),
+                        cx,
+                    ))
+                    .child(detail_line(
+                        "Observed usage",
+                        "Runtime telemetry unavailable".to_owned(),
+                        cx,
+                    )),
             )
     }
 
@@ -1095,6 +1477,67 @@ impl ManagementShell {
             }))
     }
 
+    fn instance_monitor(
+        &self,
+        snapshot: &ManagementSnapshot,
+        id: InstanceId,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let operations = snapshot
+            .host
+            .operations
+            .iter()
+            .filter(|operation| operation_affects_instance(operation, id))
+            .collect::<Vec<_>>();
+        v_flex()
+            .w_full()
+            .gap_4()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new(("instance-summary", id.0 as usize))
+                            .outline()
+                            .label("Summary")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.model.select_instance(Some(id));
+                                this.model.navigate(Section::Instances);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new(("refresh-instance-monitor", id.0 as usize))
+                            .outline()
+                            .label("Refresh")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.refresh(window, cx);
+                            })),
+                    ),
+            )
+            .child(
+                summary_section("Performance", cx).child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Historical instance telemetry is not available from this host."),
+                ),
+            )
+            .child(
+                summary_section("Tasks", cx)
+                    .children(
+                        operations
+                            .iter()
+                            .map(|operation| operation_row(operation, cx)),
+                    )
+                    .children(operations.is_empty().then(|| {
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No tasks are associated with this instance.")
+                    })),
+            )
+    }
+
     fn global_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .w_full()
@@ -1108,23 +1551,18 @@ impl ManagementShell {
                 h_flex()
                     .gap_3()
                     .child(div().font_semibold().child("Kernmux"))
-                    .child(Tag::secondary().outline().child("Control Plane")),
-            )
-            .child(
-                h_flex()
-                    .gap_3()
                     .child(
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Single host inventory"),
-                    )
-                    .child(
-                        Button::new("global-refresh")
-                            .outline()
-                            .label("Refresh")
-                            .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
+                            .child("Host Client"),
                     ),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Local administration"),
             )
     }
 
@@ -1133,9 +1571,10 @@ impl ManagementShell {
             DataState::Ready(snapshot) => snapshot.host.operations.as_slice(),
             _ => &[],
         };
+        let collapsed = self.recent_tasks_collapsed;
         v_flex()
             .w_full()
-            .h(px(126.))
+            .h(if collapsed { px(34.) } else { px(142.) })
             .border_t_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().background)
@@ -1147,13 +1586,25 @@ impl ManagementShell {
                     .bg(cx.theme().secondary.opacity(0.18))
                     .child(div().text_sm().font_semibold().child("Recent Tasks"))
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("{} operations", operations.len())),
+                        h_flex()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{} tasks", operations.len())),
+                            )
+                            .child(
+                                Button::new("toggle-recent-tasks")
+                                    .label(if collapsed { "Show" } else { "Hide" })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.recent_tasks_collapsed = !this.recent_tasks_collapsed;
+                                        cx.notify();
+                                    })),
+                            ),
                     ),
             )
-            .child(
+            .children((!collapsed).then(|| {
                 v_flex()
                     .px_4()
                     .py_2()
@@ -1162,7 +1613,27 @@ impl ManagementShell {
                         h_flex()
                             .justify_between()
                             .text_sm()
-                            .child(format!("{:?} · {}", operation.kind, operation.id.0))
+                            .child(
+                                h_flex()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .w(px(180.))
+                                            .font_medium()
+                                            .child(operation_label(operation.kind)),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(180.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(operation_target(operation)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(display_timestamp(&operation.created_at)),
+                                    ),
+                            )
                             .child(operation_tag(operation.state))
                     }))
                     .children(operations.is_empty().then(|| {
@@ -1170,8 +1641,8 @@ impl ManagementShell {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child("No recent host tasks")
-                    })),
-            )
+                    }))
+            }))
     }
 }
 
@@ -1198,6 +1669,128 @@ impl Render for ManagementShell {
             )
             .child(self.recent_tasks(cx))
     }
+}
+
+fn this_section_is_instance_monitor(
+    section: Section,
+    selected: Option<InstanceId>,
+    id: InstanceId,
+) -> bool {
+    section == Section::Operations && selected == Some(id)
+}
+
+fn instance_table_header(cx: &App) -> gpui::Div {
+    h_flex()
+        .w_full()
+        .min_h(px(36.))
+        .px_3()
+        .border_t_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().secondary.opacity(0.22))
+        .text_xs()
+        .font_medium()
+        .text_color(cx.theme().muted_foreground)
+        .child(div().w(px(260.)).child("Instance"))
+        .child(div().w(px(140.)).child("State"))
+        .child(div().w(px(90.)).child("CPU"))
+        .child(div().w(px(130.)).child("Memory"))
+        .child(div().flex_1().child("Kernel image"))
+        .child(div().w(px(72.)).child("ID"))
+}
+
+fn summary_panel(title: &str, cx: &App) -> gpui::Div {
+    v_flex()
+        .min_h(px(190.))
+        .gap_3()
+        .p_4()
+        .border_1()
+        .border_color(cx.theme().border)
+        .child(div().font_semibold().child(title.to_owned()))
+}
+
+fn summary_section(title: &str, cx: &App) -> gpui::Div {
+    v_flex()
+        .w_full()
+        .gap_3()
+        .p_4()
+        .border_1()
+        .border_color(cx.theme().border)
+        .child(div().font_semibold().child(title.to_owned()))
+}
+
+fn instance_state_label(state: InstanceState) -> String {
+    match state {
+        InstanceState::Active => "Active",
+        InstanceState::Loaded => "Loaded",
+        InstanceState::Ready => "Ready",
+        InstanceState::Absent => "Absent",
+        InstanceState::Unknown => "Unknown",
+    }
+    .to_owned()
+}
+
+fn hardware_ids(ids: &[u32]) -> String {
+    if ids.is_empty() {
+        "None".to_owned()
+    } else {
+        ids.iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+fn operation_label(kind: OperationKind) -> &'static str {
+    match kind {
+        OperationKind::InitializeResourcePool => "Configure resource pool",
+        OperationKind::ReleaseResourcePool => "Release resource pool",
+        OperationKind::CreateInstance => "Create instance",
+        OperationKind::UpdateInstance => "Update instance",
+        OperationKind::LoadInstance => "Load kernel image",
+        OperationKind::StartInstance => "Start instance",
+        OperationKind::StopInstance => "Stop instance",
+        OperationKind::UnloadInstance => "Unload kernel image",
+        OperationKind::DeleteInstance => "Delete instance",
+        OperationKind::OpenConsole => "Open console",
+        OperationKind::ImportImage => "Register image",
+        OperationKind::Unknown => "Host operation",
+    }
+}
+
+fn operation_target(operation: &Operation) -> String {
+    operation.affected_resources.first().map_or_else(
+        || "Host".to_owned(),
+        |resource| match resource.kind {
+            ResourceKind::Host => "Host".to_owned(),
+            ResourceKind::ResourcePool => "Resource pool".to_owned(),
+            ResourceKind::Instance => format!("Instance {}", resource.id),
+            ResourceKind::Device => format!("Device {}", resource.id),
+            ResourceKind::Console => format!("Console {}", resource.id),
+            ResourceKind::Image => format!("Image {}", resource.id),
+            ResourceKind::Unknown => resource.id.clone(),
+        },
+    )
+}
+
+fn operation_affects_instance(operation: &Operation, id: InstanceId) -> bool {
+    let id = id.0.to_string();
+    operation
+        .affected_resources
+        .iter()
+        .any(|resource| resource.kind == ResourceKind::Instance && resource.id == id)
+}
+
+fn display_timestamp(value: &str) -> String {
+    value.split_once('T').map_or_else(
+        || value.to_owned(),
+        |(_, time)| {
+            time.split('.')
+                .next()
+                .unwrap_or(time)
+                .trim_end_matches('Z')
+                .to_owned()
+        },
+    )
 }
 
 fn card(cx: &App) -> gpui::Div {
@@ -1228,24 +1821,6 @@ fn input_field(label: &str, detail: &str, input: Input, cx: &App) -> impl IntoEl
         .gap_2()
         .child(div().text_sm().font_medium().child(label.to_owned()))
         .child(input.aria_label(label.to_owned()))
-        .child(
-            div()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child(detail.to_owned()),
-        )
-}
-
-fn metric_card(label: &str, value: usize, detail: &str, cx: &App) -> impl IntoElement {
-    card(cx)
-        .gap_2()
-        .child(
-            div()
-                .text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(label.to_owned()),
-        )
-        .child(div().text_2xl().font_semibold().child(value.to_string()))
         .child(
             div()
                 .text_xs()
@@ -1292,42 +1867,6 @@ fn memory_card(snapshot: &ManagementSnapshot, cx: &App) -> impl IntoElement {
                     bytes(memory.total_bytes),
                     bytes(memory.host_reserved_bytes)
                 )),
-        )
-}
-
-fn host_card(snapshot: &ManagementSnapshot, cx: &App) -> impl IntoElement {
-    let host = &snapshot.host;
-    card(cx)
-        .child(card_heading(
-            "Control kernel",
-            "Runtime identity and management capability",
-            cx,
-        ))
-        .child(detail_line("Release", host.kernel.release.clone(), cx))
-        .child(detail_line(
-            "Architecture",
-            host.topology.architecture.clone(),
-            cx,
-        ))
-        .child(detail_line(
-            "Capabilities",
-            host.capabilities.len().to_string(),
-            cx,
-        ))
-        .child(
-            h_flex()
-                .justify_between()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Multikernel"),
-                )
-                .child(if host.kernel.multikernel_enabled {
-                    Tag::success().outline().child("Enabled")
-                } else {
-                    Tag::danger().outline().child("Disabled")
-                }),
         )
 }
 
@@ -1388,12 +1927,12 @@ fn operation_row(operation: &Operation, cx: &App) -> impl IntoElement {
                 .child(
                     v_flex()
                         .gap_1()
-                        .child(div().font_medium().child(format!("{:?}", operation.kind)))
+                        .child(div().font_medium().child(operation_label(operation.kind)))
                         .child(
                             div()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(operation.id.0.clone()),
+                                .child(operation_target(operation)),
                         ),
                 )
                 .child(operation_tag(operation.state)),
@@ -1407,7 +1946,10 @@ fn operation_row(operation: &Operation, cx: &App) -> impl IntoElement {
             div()
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
-                .child(format!("Started {}", operation.created_at)),
+                .child(format!(
+                    "Started {}",
+                    display_timestamp(&operation.created_at)
+                )),
         )
 }
 
@@ -1458,16 +2000,6 @@ fn operation_tag(state: OperationState) -> Tag {
     }
 }
 
-fn section_icon(section: Section) -> IconName {
-    match section {
-        Section::Overview => IconName::LayoutDashboard,
-        Section::Resources => IconName::Cpu,
-        Section::Instances => IconName::Frame,
-        Section::Images => IconName::HardDrive,
-        Section::Operations => IconName::ChartPie,
-    }
-}
-
 fn section_description(section: Section) -> &'static str {
     match section {
         Section::Overview => "Host health, capacity, and active kernel domains",
@@ -1479,6 +2011,15 @@ fn section_description(section: Section) -> &'static str {
 }
 
 fn percent(value: u64, total: u64) -> f32 {
+    if total == 0 {
+        0.0
+    } else {
+        let whole = value.saturating_mul(100).saturating_div(total).min(100);
+        f32::from(u8::try_from(whole).unwrap_or(100))
+    }
+}
+
+fn percent_usize(value: usize, total: usize) -> f32 {
     if total == 0 {
         0.0
     } else {
