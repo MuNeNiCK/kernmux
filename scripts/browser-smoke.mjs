@@ -114,6 +114,10 @@ try {
   assert.equal(await evaluate(cdp, sessionId, "location.hash"), "");
   assert.equal(await evaluate(cdp, sessionId, "localStorage.length"), 0);
   assert.equal(await evaluate(cdp, sessionId, "sessionStorage.length"), 0);
+  assert.equal(await evaluate(cdp, sessionId, "document.querySelectorAll('main').length"), 1);
+  assert.equal(await evaluate(cdp, sessionId, "document.querySelectorAll('a:not([href])').length"), 0);
+  assert.equal(await evaluate(cdp, sessionId,
+    `document.querySelector('[data-testid="recent-tasks"]')?.getBoundingClientRect().height > 80`), true);
   const initialDimensions = await evaluate(cdp, sessionId,
     "[document.documentElement.scrollWidth, innerWidth, innerHeight]");
   assert.deepEqual(initialDimensions, [1280, 1280, 800]);
@@ -128,13 +132,38 @@ try {
     await writeFile(screenshotPath, Buffer.from(data, "base64"));
   }
 
+  assert.equal(await evaluate(cdp, sessionId,
+    `Boolean(document.querySelector('[data-testid="host-summary"]'))`), true);
+  await clickTestId(cdp, sessionId, "tab-monitor");
+  await waitFor(() => evaluate(cdp, sessionId,
+    `Boolean(document.querySelector('[data-testid="host-monitor"]'))`),
+  "host monitor did not render");
+
+  await clickTestId(cdp, sessionId, "nav-images");
+  await waitFor(() => evaluate(cdp, sessionId,
+    `Boolean(document.querySelector('[data-testid="images-table"]'))`),
+  "image inventory did not render");
+  await clickTestId(cdp, sessionId, "tab-manage");
+  await waitFor(() => evaluate(cdp, sessionId,
+    `document.body.textContent.includes('Import image from host')`),
+  "image management flow did not render");
+
+  await clickTestId(cdp, sessionId, "nav-operations");
+  await waitFor(() => evaluate(cdp, sessionId,
+    `Boolean(document.querySelector('[data-testid="operations-table"]'))`),
+  "operations inventory did not render");
+
   await waitFor(() => evaluate(cdp, sessionId,
     `Boolean(document.querySelector('[data-testid="nav-instance-1"]'))`),
   "fixture instance did not appear in inventory");
   await clickTestId(cdp, sessionId, "nav-instance-1");
   await waitFor(() => evaluate(cdp, sessionId,
-    `document.querySelector('.object-heading h1')?.textContent === 'lab'`),
+    `document.querySelector('[data-testid="object-title"]')?.textContent === 'lab' && Boolean(document.querySelector('[data-testid="instance-summary"]'))`),
   "instance detail did not open");
+  await clickTestId(cdp, sessionId, "tab-monitor");
+  await waitFor(() => evaluate(cdp, sessionId,
+    `Boolean(document.querySelector('[data-testid="instance-monitor"]'))`),
+  "instance monitor did not render");
   await clickTestId(cdp, sessionId, "tab-manage");
   try {
     await waitFor(() => evaluate(cdp, sessionId,
@@ -142,7 +171,7 @@ try {
     "instance management actions did not render");
   } catch (error) {
     const state = await evaluate(cdp, sessionId, `({
-      title: document.querySelector('.object-heading h1')?.textContent,
+      title: document.querySelector('[data-testid="object-title"]')?.textContent,
       tabs: [...document.querySelectorAll('[role="tab"]')].map(tab => [tab.textContent, tab.getAttribute('aria-selected')]),
       content: document.querySelector('.content')?.textContent,
     })`);
@@ -152,6 +181,14 @@ try {
   await waitFor(() => evaluate(cdp, sessionId,
     `Boolean(document.querySelector('[data-testid="confirm-delete"]'))`),
   "delete confirmation did not open");
+  await evaluate(cdp, sessionId, `(() => {
+    const input = document.querySelector('#destructive-confirmation');
+    input.value = 'lab';
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: 'lab' }));
+  })()`);
+  await waitFor(() => evaluate(cdp, sessionId,
+    `document.querySelector('[data-testid="confirm-delete"]')?.disabled === false`),
+  "typed delete confirmation was not accepted");
   await clickTestId(cdp, sessionId, "confirm-delete");
   await waitFor(() => requests.some((request) =>
     request.method === "DELETE" && request.path === "/1.0/instances/1"),
@@ -164,7 +201,7 @@ try {
   assert.deepEqual(JSON.parse(mutation.body), { expected_generation: 7 });
 
   await cdp.send("Emulation.setDeviceMetricsOverride", {
-    width: 900,
+    width: 640,
     height: 650,
     deviceScaleFactor: 1,
     mobile: false,
@@ -172,8 +209,12 @@ try {
   await waitFor(async () => {
     const dimensions = await evaluate(cdp, sessionId,
       "[document.documentElement.scrollWidth, innerWidth, innerHeight]");
-    return dimensions[0] <= dimensions[1] && dimensions[1] === 900 && dimensions[2] === 650;
+    return dimensions[0] <= dimensions[1] && dimensions[1] === 640 && dimensions[2] === 650;
   }, "management console overflows the viewport");
+  await clickTestId(cdp, sessionId, "mobile-inventory-trigger");
+  await waitFor(() => evaluate(cdp, sessionId,
+    `(() => { const rect = document.querySelector('[data-testid="mobile-inventory"]')?.getBoundingClientRect(); return rect && rect.width > 250 && rect.left >= -1 })()`),
+  "mobile inventory did not open");
 
   if (screenshotPath) {
     const { data } = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
@@ -225,6 +266,13 @@ function fixtureResponse(method, target, isDeleted, markDeleted) {
   }
   if (method === "GET" && target === "/1.0/images") {
     return { status: 200, body: result(isDeleted() ? 8 : 7, []) };
+  }
+  if (method === "GET" && target === "/1.0/events?after=0") {
+    return { status: 200, body: result(isDeleted() ? 8 : 7, {
+      events: [{ sequence: 1, snapshot_generation: 7, kind: "instance_changed", resource: { kind: "instance", id: "1" } }],
+      overflowed: false,
+      latest_sequence: 1,
+    }) };
   }
   if (method === "DELETE" && target === "/1.0/instances/1") {
     return { status: 202, body: { kind: "accepted", operation: operation("queued") } };
@@ -301,8 +349,24 @@ function hostSnapshot(withoutInstance) {
       resources: { cpu_hardware_ids: [2, 3], memory_bytes: 4294967296, device_ids: [] },
       image: { present: false },
     }],
-    transactions: [],
-    operations: [],
+    transactions: [{
+      id: "tx-7",
+      state: "applied",
+      generation_before: 6,
+      generation_after: 7,
+      diagnostics: [],
+    }],
+    operations: [{
+      id: "op-create-1",
+      kind: "create_instance",
+      state: "succeeded",
+      expected_generation: 6,
+      observed_generation: 7,
+      progress_percent: 100,
+      affected_resources: [{ kind: "instance", id: "1" }],
+      created_at: "2026-08-31T00:00:00Z",
+      completed_at: "2026-08-31T00:00:01Z",
+    }],
   };
 }
 

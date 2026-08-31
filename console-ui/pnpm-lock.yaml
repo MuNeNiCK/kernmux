@@ -11,6 +11,9 @@ importers:
       '@corvu/drawer':
         specifier: ^0.2.4
         version: 0.2.4(solid-js@1.9.15)
+      '@corvu/resizable':
+        specifier: ^0.2.5
+        version: 0.2.5(solid-js@1.9.15)
       '@kobalte/core':
         specifier: 0.13.11
         version: 0.13.11(solid-js@1.9.15)
@@ -163,6 +166,11 @@ packages:
 
   '@corvu/drawer@0.2.4':
     resolution: {integrity: sha512-7jQoGZ8ROB9CmXam2nMY2wEskU3IoFwZQywkF/7vrBc/edGsPv7mOVQ1GN6G+4nd7nrMZ3UtqHAhmRh9V0azlw==}
+    peerDependencies:
+      solid-js: ^1.8
+
+  '@corvu/resizable@0.2.5':
+    resolution: {integrity: sha512-psax38DraM9SXtaNh/sfvizGO6xLCL4sqT4rWYlMZP5ZsUM05Q30tvXgnTo2roQFNOz2e06WofhDsBXTjY6g4A==}
     peerDependencies:
       solid-js: ^1.8
 
@@ -1395,6 +1403,11 @@ snapshots:
       '@solid-primitives/memo': 1.5.1(solid-js@1.9.15)
       solid-js: 1.9.15
       solid-transition-size: 0.1.4(solid-js@1.9.15)
+
+  '@corvu/resizable@0.2.5(solid-js@1.9.15)':
+    dependencies:
+      '@corvu/utils': 0.4.2(solid-js@1.9.15)
+      solid-js: 1.9.15
 
   '@corvu/utils@0.3.2(solid-js@1.9.15)':
     dependencies:
