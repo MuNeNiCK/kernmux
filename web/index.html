@@ -9,7 +9,8 @@
     <style>
       * { box-sizing: border-box; }
       html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #020617; }
-      body > canvas { display: block; width: 100%; height: 100%; touch-action: none; outline: none; user-select: none; }
+      body > canvas { display: block; width: 100%; height: 100%; touch-action: manipulation; outline: none; user-select: none; }
+      body > canvas:focus-visible { box-shadow: inset 0 0 0 2px #2563eb; }
     </style>
   </head>
   <body>

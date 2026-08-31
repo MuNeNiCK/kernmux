@@ -5,7 +5,7 @@ use gpui::{
     prelude::*, px, size,
 };
 use gpui_component::{
-    ActiveTheme, Icon, IconName, Root, Sizable, StyledExt,
+    ActiveTheme, Disableable, Icon, IconName, Root, Selectable, Sizable, StyledExt,
     alert::Alert,
     button::{Button, ButtonVariants},
     h_flex,
@@ -213,33 +213,22 @@ impl ManagementShell {
             .collect::<Vec<_>>();
 
         Sidebar::new("host-navigation")
-            .w(px(244.))
+            .w(px(196.))
             .h_full()
             .border_0()
             .header(
                 SidebarHeader::new()
                     .w_full()
-                    .child(
-                        div()
-                            .size_8()
-                            .rounded(cx.theme().radius)
-                            .border_1()
-                            .border_color(cx.theme().border)
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .font_semibold()
-                            .child("K"),
-                    )
+                    .child(Icon::new(IconName::LayoutDashboard).size_5())
                     .child(
                         v_flex()
                             .gap_0()
-                            .child(div().font_semibold().child("Kernmux"))
+                            .child(div().text_sm().font_semibold().child("Navigator"))
                             .child(
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child("Navigator"),
+                                    .child("Single host inventory"),
                             ),
                     ),
             )
@@ -333,27 +322,145 @@ impl ManagementShell {
                 )
             },
         );
-        h_flex()
+        let object_tabs = if let Some(instance) = selected_instance {
+            let id = instance.id;
+            h_flex()
+                .h(px(36.))
+                .px_3()
+                .gap_1()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(
+                    Button::new(("instance-summary-tab", id.0 as usize))
+                        .ghost()
+                        .small()
+                        .label("Summary")
+                        .selected(section == Section::Instances)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.model.select_instance(Some(id));
+                            this.model.navigate(Section::Instances);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new(("instance-monitor-tab", id.0 as usize))
+                        .ghost()
+                        .small()
+                        .label("Monitor")
+                        .selected(section == Section::Operations)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.model.select_instance(Some(id));
+                            this.model.navigate(Section::Operations);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new(("instance-manage-tab", id.0 as usize))
+                        .ghost()
+                        .small()
+                        .label("Manage")
+                        .selected(section == Section::Resources)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.model.select_instance(Some(id));
+                            this.model.navigate(Section::Resources);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element()
+        } else if matches!(
+            section,
+            Section::Overview | Section::Resources | Section::Operations
+        ) {
+            h_flex()
+                .h(px(36.))
+                .px_3()
+                .gap_1()
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .child(
+                    Button::new("host-summary-tab")
+                        .ghost()
+                        .small()
+                        .label("Summary")
+                        .selected(section == Section::Overview)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.navigate(Section::Overview);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("host-monitor-tab")
+                        .ghost()
+                        .small()
+                        .label("Monitor")
+                        .selected(section == Section::Operations)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.navigate(Section::Operations);
+                            cx.notify();
+                        })),
+                )
+                .child(
+                    Button::new("host-manage-tab")
+                        .ghost()
+                        .small()
+                        .label("Manage")
+                        .selected(section == Section::Resources)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.model.navigate(Section::Resources);
+                            cx.notify();
+                        })),
+                )
+                .into_any_element()
+        } else {
+            div().h(px(1.)).into_any_element()
+        };
+
+        v_flex()
             .w_full()
-            .min_h(px(64.))
-            .px_6()
-            .py_3()
-            .gap_4()
-            .justify_between()
             .border_b_1()
             .border_color(cx.theme().border)
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(div().text_xl().font_semibold().child(title))
+                h_flex()
+                    .w_full()
+                    .min_h(px(58.))
+                    .px_4()
+                    .py_2()
+                    .gap_3()
+                    .justify_between()
                     .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(detail),
-                    ),
+                        h_flex()
+                            .min_w_0()
+                            .gap_3()
+                            .child(
+                                div()
+                                    .size_9()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
+                                    .child(Icon::new(if selected_instance.is_some() {
+                                        IconName::Frame
+                                    } else {
+                                        IconName::LayoutDashboard
+                                    })),
+                            )
+                            .child(
+                                v_flex()
+                                    .min_w_0()
+                                    .gap_0()
+                                    .child(div().text_lg().font_semibold().child(title))
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(detail),
+                                    ),
+                            ),
+                    )
+                    .children(selected_instance.map(|instance| instance_tag(instance.state))),
             )
-            .children(selected_instance.map(|instance| instance_tag(instance.state)))
+            .child(object_tabs)
     }
 
     fn content(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -362,7 +469,13 @@ impl ManagementShell {
             DataState::Failed(message) => self.failed_state(message, cx).into_any_element(),
             DataState::Ready(snapshot) => match self.model.section() {
                 Section::Overview => self.overview(snapshot, cx).into_any_element(),
-                Section::Resources => self.resources(snapshot, cx).into_any_element(),
+                Section::Resources => {
+                    if let Some(id) = self.model.selected_instance() {
+                        self.instance_manage(snapshot, id, cx).into_any_element()
+                    } else {
+                        self.resources(snapshot, cx).into_any_element()
+                    }
+                }
                 Section::Instances => self.instances(snapshot, cx).into_any_element(),
                 Section::Images => self.images(snapshot, cx).into_any_element(),
                 Section::Operations => {
@@ -379,14 +492,14 @@ impl ManagementShell {
             .flex_1()
             .min_h_0()
             .overflow_y_scrollbar()
-            .p_6()
-            .gap_4()
+            .p_3()
+            .gap_3()
             .children(self.action_error.as_ref().map(|message| {
                 Alert::error("action-error", message.clone()).title("Host action failed")
             }))
             .children(self.setup.map(|setup| self.setup_panel(setup, cx)))
             .child(body)
-            .when(window.bounds().size.width < px(1000.), |this| this.p_4())
+            .when(window.bounds().size.width < px(1000.), |this| this.p_2())
     }
 
     fn loading_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -700,6 +813,155 @@ impl ManagementShell {
     }
 
     fn overview(&self, snapshot: &ManagementSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
+        let host = &snapshot.host;
+        let active = host
+            .instances
+            .iter()
+            .filter(|item| item.state == InstanceState::Active)
+            .count();
+        let logical_cpus = host.topology.cpus.len()
+            + host
+                .resource_pool
+                .cpu_hardware_ids
+                .iter()
+                .filter(|id| !host.topology.cpus.iter().any(|cpu| cpu.hardware_id == **id))
+                .count();
+        let delegated_cpus = host.resource_pool.cpu_hardware_ids.len();
+
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(
+                h_flex()
+                    .min_h(px(38.))
+                    .gap_2()
+                    .child(
+                        Button::new("configure-host")
+                            .primary()
+                            .small()
+                            .label("Configure resource pool")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.setup = Some(SetupPanel::ResourcePool);
+                                this.action_error = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("refresh-host-summary")
+                            .outline()
+                            .small()
+                            .label("Refresh")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.refresh(window, cx);
+                            })),
+                    ),
+            )
+            .children((host.health != SnapshotHealth::Healthy).then(|| {
+                Alert::warning(
+                    "host-health",
+                    "Some host resources could not be verified. Mutations remain fail-closed.",
+                )
+                .title("Host state needs attention")
+            }))
+            .child(
+                div()
+                    .grid()
+                    .grid_cols(2)
+                    .gap_3()
+                    .child(
+                        property_panel("Host details", cx)
+                            .child(property_row("Kernel", host.kernel.release.clone(), cx))
+                            .child(property_row(
+                                "Architecture",
+                                host.topology.architecture.clone(),
+                                cx,
+                            ))
+                            .child(property_row(
+                                "Multikernel",
+                                if host.kernel.multikernel_enabled {
+                                    "Enabled"
+                                } else {
+                                    "Disabled"
+                                }
+                                .to_owned(),
+                                cx,
+                            ))
+                            .child(property_row("Health", format!("{:?}", host.health), cx)),
+                    )
+                    .child(
+                        property_panel("Capacity", cx)
+                            .child(utilization_row(
+                                "CPU delegated",
+                                format!("{delegated_cpus} of {logical_cpus}"),
+                                percent_usize(delegated_cpus, logical_cpus),
+                                "CPUs delegated to peer kernels",
+                                cx,
+                            ))
+                            .child(utilization_row(
+                                "Memory assigned",
+                                format!(
+                                    "{} of {}",
+                                    bytes(host.memory.assigned_bytes),
+                                    bytes(host.memory.assignable_bytes)
+                                ),
+                                percent(host.memory.assigned_bytes, host.memory.assignable_bytes),
+                                "Memory assigned to peer kernels",
+                                cx,
+                            )),
+                    ),
+            )
+            .child(
+                div()
+                    .grid()
+                    .grid_cols(2)
+                    .gap_3()
+                    .child(
+                        property_panel("Inventory", cx)
+                            .child(property_row(
+                                "Kernel instances",
+                                host.instances.len().to_string(),
+                                cx,
+                            ))
+                            .child(property_row("Active instances", active.to_string(), cx))
+                            .child(property_row(
+                                "Registered images",
+                                snapshot.images.len().to_string(),
+                                cx,
+                            ))
+                            .child(property_row(
+                                "Recent tasks",
+                                host.operations.len().to_string(),
+                                cx,
+                            )),
+                    )
+                    .child(
+                        property_panel("Hardware", cx)
+                            .child(property_row("Logical CPUs", logical_cpus.to_string(), cx))
+                            .child(property_row(
+                                "NUMA nodes",
+                                host.topology.numa_nodes.len().to_string(),
+                                cx,
+                            ))
+                            .child(property_row(
+                                "Physical memory",
+                                bytes(host.memory.total_bytes),
+                                cx,
+                            ))
+                            .child(property_row(
+                                "Control-kernel reservation",
+                                bytes(host.memory.host_reserved_bytes),
+                                cx,
+                            )),
+                    ),
+            )
+    }
+
+    #[allow(dead_code)]
+    fn overview_legacy(
+        &self,
+        snapshot: &ManagementSnapshot,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let host = &snapshot.host;
         let active = host
             .instances
@@ -1391,6 +1653,143 @@ impl ManagementShell {
             )
     }
 
+    fn instance_manage(
+        &self,
+        snapshot: &ManagementSnapshot,
+        id: InstanceId,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let Some(instance) = snapshot.host.instances.iter().find(|item| item.id == id) else {
+            return v_flex().w_full().child(Alert::error(
+                "missing-instance",
+                "The selected instance no longer exists.",
+            ));
+        };
+        let generation = snapshot.host.generation;
+        let unload = Intent::UnloadInstance {
+            id,
+            expected_generation: generation,
+        };
+
+        v_flex()
+            .w_full()
+            .gap_3()
+            .child(
+                h_flex()
+                    .min_h(px(38.))
+                    .gap_2()
+                    .child(
+                        Button::new(("manage-load-image", id.0 as usize))
+                            .primary()
+                            .label(if instance.image.present {
+                                "Replace kernel image"
+                            } else {
+                                "Load kernel image"
+                            })
+                            .disabled(instance.state != InstanceState::Ready)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.setup = Some(SetupPanel::LoadImage(id));
+                                this.action_error = None;
+                                cx.notify();
+                            })),
+                    )
+                    .children((instance.state == InstanceState::Loaded).then(|| {
+                        Button::new(("manage-unload", id.0 as usize))
+                            .outline()
+                            .label("Unload image")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.dispatch(unload.clone(), window, cx);
+                            }))
+                    }))
+                    .child(
+                        Button::new(("manage-refresh", id.0 as usize))
+                            .outline()
+                            .label("Refresh")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.refresh(window, cx);
+                            })),
+                    ),
+            )
+            .child(
+                div()
+                    .grid()
+                    .grid_cols(2)
+                    .gap_3()
+                    .child(
+                        property_panel("Resource assignment", cx)
+                            .child(property_row(
+                                "CPU hardware IDs",
+                                hardware_ids(&instance.resources.cpu_hardware_ids),
+                                cx,
+                            ))
+                            .child(property_row(
+                                "Logical CPU count",
+                                instance.resources.cpu_hardware_ids.len().to_string(),
+                                cx,
+                            ))
+                            .child(property_row(
+                                "Assigned memory",
+                                bytes(instance.resources.memory_bytes),
+                                cx,
+                            ))
+                            .child(property_row(
+                                "Memory base",
+                                instance.resources.memory_base.map_or_else(
+                                    || "Not reported".to_owned(),
+                                    |base| format!("0x{base:x}"),
+                                ),
+                                cx,
+                            )),
+                    )
+                    .child(
+                        property_panel("Kernel boot configuration", cx)
+                            .child(property_row(
+                                "Image state",
+                                if instance.image.present {
+                                    "Loaded"
+                                } else {
+                                    "Not loaded"
+                                }
+                                .to_owned(),
+                                cx,
+                            ))
+                            .child(property_row(
+                                "Lifecycle state",
+                                instance_state_label(instance.state),
+                                cx,
+                            ))
+                            .child(property_row(
+                                "Console transport",
+                                if instance.state == InstanceState::Active {
+                                    "MKTTY available"
+                                } else {
+                                    "Available when active"
+                                }
+                                .to_owned(),
+                                cx,
+                            )),
+                    ),
+            )
+            .child(
+                property_panel("Assigned devices", cx).child(property_row(
+                    "Device IDs",
+                    if instance.resources.device_ids.is_empty() {
+                        "No devices assigned".to_owned()
+                    } else {
+                        instance.resources.device_ids.join(", ")
+                    },
+                    cx,
+                )),
+            )
+            .child(
+                Alert::info(
+                    ("manage-note", id.0 as usize),
+                    "Resource changes are validated against the authoritative host topology before they are applied.",
+                )
+                .title("Fail-closed resource management"),
+            )
+    }
+
     fn images(&self, snapshot: &ManagementSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
         let empty = snapshot.images.is_empty();
         v_flex()
@@ -1541,26 +1940,27 @@ impl ManagementShell {
     fn global_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         h_flex()
             .w_full()
-            .h(px(52.))
-            .px_4()
+            .h(px(38.))
+            .px_3()
             .justify_between()
             .border_b_1()
             .border_color(cx.theme().border)
             .bg(cx.theme().secondary.opacity(0.22))
             .child(
                 h_flex()
-                    .gap_3()
+                    .gap_2()
+                    .child(Icon::new(IconName::Cpu).size_4())
                     .child(div().font_semibold().child("Kernmux"))
                     .child(
                         div()
-                            .text_sm()
+                            .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child("Host Client"),
                     ),
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child("Local administration"),
             )
@@ -1606,35 +2006,44 @@ impl ManagementShell {
             )
             .children((!collapsed).then(|| {
                 v_flex()
-                    .px_4()
-                    .py_2()
-                    .gap_1()
+                    .child(
+                        h_flex()
+                            .h(px(26.))
+                            .px_3()
+                            .bg(cx.theme().secondary.opacity(0.22))
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(div().w(px(180.)).child("Task"))
+                            .child(div().w(px(180.)).child("Target"))
+                            .child(div().flex_1().child("Started"))
+                            .child(div().w(px(110.)).child("Result")),
+                    )
                     .children(operations.iter().rev().take(3).map(|operation| {
                         h_flex()
-                            .justify_between()
-                            .text_sm()
+                            .h(px(27.))
+                            .px_3()
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .text_xs()
                             .child(
-                                h_flex()
-                                    .gap_3()
-                                    .child(
-                                        div()
-                                            .w(px(180.))
-                                            .font_medium()
-                                            .child(operation_label(operation.kind)),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(180.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(operation_target(operation)),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(display_timestamp(&operation.created_at)),
-                                    ),
+                                div()
+                                    .w(px(180.))
+                                    .font_medium()
+                                    .child(operation_label(operation.kind)),
                             )
-                            .child(operation_tag(operation.state))
+                            .child(
+                                div()
+                                    .w(px(180.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(operation_target(operation)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(display_timestamp(&operation.created_at)),
+                            )
+                            .child(div().w(px(110.)).child(operation_tag(operation.state)))
                     }))
                     .children(operations.is_empty().then(|| {
                         div()
@@ -1706,6 +2115,76 @@ fn summary_panel(title: &str, cx: &App) -> gpui::Div {
         .border_1()
         .border_color(cx.theme().border)
         .child(div().font_semibold().child(title.to_owned()))
+}
+
+fn property_panel(title: &str, cx: &App) -> gpui::Div {
+    v_flex()
+        .w_full()
+        .border_1()
+        .border_color(cx.theme().border)
+        .child(
+            h_flex()
+                .h(px(30.))
+                .px_3()
+                .bg(cx.theme().secondary.opacity(0.28))
+                .border_b_1()
+                .border_color(cx.theme().border)
+                .text_sm()
+                .font_semibold()
+                .child(title.to_owned()),
+        )
+}
+
+fn property_row(label: &str, value: String, cx: &App) -> impl IntoElement {
+    h_flex()
+        .min_h(px(30.))
+        .border_t_1()
+        .border_color(cx.theme().border.opacity(0.65))
+        .text_sm()
+        .child(
+            div()
+                .w(px(190.))
+                .self_stretch()
+                .flex()
+                .items_center()
+                .px_3()
+                .bg(cx.theme().secondary.opacity(0.16))
+                .text_color(cx.theme().muted_foreground)
+                .child(label.to_owned()),
+        )
+        .child(div().min_w_0().flex_1().px_3().child(value))
+}
+
+fn utilization_row(
+    label: &str,
+    value: String,
+    percent_value: f32,
+    accessibility_label: &str,
+    cx: &App,
+) -> impl IntoElement {
+    v_flex()
+        .gap_1()
+        .px_3()
+        .py_2()
+        .border_t_1()
+        .border_color(cx.theme().border.opacity(0.65))
+        .child(
+            h_flex()
+                .justify_between()
+                .text_sm()
+                .child(label.to_owned())
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(value),
+                ),
+        )
+        .child(
+            Progress::new(accessibility_label.to_owned())
+                .value(percent_value)
+                .accessibility_label(accessibility_label.to_owned()),
+        )
 }
 
 fn summary_section(title: &str, cx: &App) -> gpui::Div {
@@ -1959,9 +2438,8 @@ fn empty_state(title: &str, detail: &str, cx: &App) -> impl IntoElement {
         .items_center()
         .justify_center()
         .gap_2()
-        .py_16()
-        .rounded(cx.theme().radius_lg)
-        .border_1()
+        .py_6()
+        .border_t_1()
         .border_color(cx.theme().border)
         .child(
             Icon::new(IconName::Inbox)

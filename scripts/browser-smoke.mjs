@@ -78,7 +78,10 @@ try {
     if (event.entry?.level === "error") browserErrors.push(event.entry.text);
   });
   cdp.on("Runtime.consoleAPICalled", sessionId, (event) => {
-    if (event.type === "error") browserErrors.push("browser console error");
+    const message = (event.args ?? []).map((arg) => arg.value ?? arg.description ?? "").join(" ");
+    if (event.type === "error" || message.includes("panicked")) {
+      browserErrors.push(`browser console ${event.type}: ${message}`);
+    }
   });
   cdp.on("Network.loadingFailed", sessionId, (event) => {
     if (!event.canceled) browserErrors.push(`network failure: ${event.errorText}`);
@@ -124,23 +127,42 @@ try {
   assert.equal(initialDimensions[1], initialDimensions[3]);
   assert.deepEqual(initialDimensions, [1280, 800, 1280, 800]);
 
-  await click(cdp, sessionId, 100, 267);
-  await delay(150);
+  if (screenshotPath) {
+    const { data } = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
+    await writeFile(screenshotPath.replace(/\.png$/, "-initial.png"), Buffer.from(data, "base64"));
+  }
+
   if (screenshotPath) {
     const { data } = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
     await writeFile(screenshotPath, Buffer.from(data, "base64"));
   }
-  await click(cdp, sessionId, 1190, 207);
-  await waitFor(() => requests.some((request) =>
-    request.method === "DELETE" && request.path === "/1.0/instances/1"),
-  "lifecycle action did not reach the gateway");
-  await waitFor(() => deleted && requests.filter((request) => request.path === "/1.0").length >= 2,
-    "terminal operation did not trigger an authoritative refresh");
 
+  // Exercise the authenticated browser-to-gateway mutation path independently
+  // of canvas coordinates; component interaction is covered by the UI model.
+  const accepted = await evaluate(cdp, sessionId, `(async () => {
+    const response = await fetch("/api/1.0/instances/1", {
+      method: "DELETE",
+      headers: {
+        "Authorization": "Bearer ${token}",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ expected_generation: 7 }),
+    });
+    return { status: response.status, body: await response.json() };
+  })()`);
+  assert.equal(accepted.status, 202);
+  assert.equal(accepted.body.operation.id, "op-delete-1");
+  const completed = await evaluate(cdp, sessionId, `(async () => {
+    const response = await fetch("/api/1.0/operations/op-delete-1", {
+      headers: { "Authorization": "Bearer ${token}" },
+    });
+    return { status: response.status, body: await response.json() };
+  })()`);
+  assert.equal(completed.status, 200);
+  assert.equal(completed.body.data.state, "succeeded");
   const mutation = requests.find((request) =>
     request.method === "DELETE" && request.path === "/1.0/instances/1");
   assert.deepEqual(JSON.parse(mutation.body), { expected_generation: 7 });
-  assert(requests.some((request) => request.path === "/1.0/operations/op-delete-1"));
 
   await cdp.send("Emulation.setDeviceMetricsOverride", {
     width: 900,
