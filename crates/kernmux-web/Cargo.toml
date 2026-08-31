@@ -19,6 +19,7 @@ kernmux-ui-model.workspace = true
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "399258feeaf90ad8a3a208c99221ee87b6452f38" }
+gloo-timers = { version = "=0.3.0", features = ["futures"] }
 js-sys = "=0.3.103"
 serde_json.workspace = true
 serde.workspace = true

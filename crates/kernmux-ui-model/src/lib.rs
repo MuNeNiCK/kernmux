@@ -130,6 +130,7 @@ impl ManagementModel {
             self.selected_instance = None;
         }
         self.data = DataState::Ready(Box::new(snapshot));
+        self.pending_intent = None;
     }
 
     pub fn fail(&mut self, message: impl Into<String>) {
@@ -378,5 +379,23 @@ mod tests {
             Err("host data is not ready")
         );
         assert_eq!(model.take_intent(), None);
+    }
+
+    #[test]
+    fn authoritative_refresh_releases_the_pending_action() {
+        let mut model = ManagementModel::from_snapshot(snapshot());
+        let intent = Intent::StopInstance {
+            id: InstanceId(2),
+            expected_generation: Generation(7),
+            force: false,
+        };
+        model.request(intent.clone()).unwrap();
+        assert_eq!(
+            model.request(intent.clone()),
+            Err("another action is pending")
+        );
+
+        model.replace_snapshot(snapshot());
+        model.request(intent).unwrap();
     }
 }

@@ -1,13 +1,15 @@
-use std::cell::OnceCell;
+use std::{cell::OnceCell, rc::Rc};
 
 use gpui::{
     App, Bounds, Context, Entity, IntoElement, Render, Window, WindowBounds, WindowOptions, div,
     prelude::*, px, rgb, size,
 };
-use kernmux_ui_model::{DataState, ManagementModel, ManagementSnapshot, Section};
+use kernmux_api::v1::{Generation, Instance, InstanceState};
+use kernmux_ui_model::{DataState, Intent, ManagementModel, ManagementSnapshot, Section};
 
 thread_local! {
     static SHELL: OnceCell<Entity<ManagementShell>> = const { OnceCell::new() };
+    static INTENT_HANDLER: OnceCell<Rc<dyn Fn(Intent)>> = const { OnceCell::new() };
 }
 
 struct ManagementShell {
@@ -53,8 +55,109 @@ impl ManagementShell {
             .child(section.label())
     }
 
+    fn dispatch(&mut self, intent: Intent, cx: &mut Context<Self>) {
+        if self.model.request(intent.clone()).is_err() {
+            return;
+        }
+        INTENT_HANDLER.with(|slot| {
+            if let Some(handler) = slot.get() {
+                handler(intent);
+            }
+        });
+        cx.notify();
+    }
+
+    fn action_button(
+        &self,
+        label: &'static str,
+        key: (&'static str, u32),
+        intent: Intent,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        div()
+            .id(key)
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .cursor_pointer()
+            .text_sm()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .bg(rgb(0x001e_40af))
+            .hover(|style| style.bg(rgb(0x001d_4ed8)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.dispatch(intent.clone(), cx);
+            }))
+            .child(label)
+    }
+
+    fn instance_panel(
+        &self,
+        instance: &Instance,
+        generation: Generation,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let action = match instance.state {
+            InstanceState::Loaded => Some(self.action_button(
+                "Start",
+                ("start-instance", instance.id.0),
+                Intent::StartInstance {
+                    id: instance.id,
+                    expected_generation: generation,
+                },
+                cx,
+            )),
+            InstanceState::Active => Some(self.action_button(
+                "Stop",
+                ("stop-instance", instance.id.0),
+                Intent::StopInstance {
+                    id: instance.id,
+                    expected_generation: generation,
+                    force: false,
+                },
+                cx,
+            )),
+            InstanceState::Ready => Some(self.action_button(
+                "Delete",
+                ("delete-instance", instance.id.0),
+                Intent::DeleteInstance {
+                    id: instance.id,
+                    expected_generation: generation,
+                },
+                cx,
+            )),
+            InstanceState::Absent | InstanceState::Unknown => None,
+        };
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .p_4()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(0x001e_293b))
+            .bg(rgb(0x000f_172a))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(format!("{} · {}", instance.name, instance.id.0)),
+                    )
+                    .child(div().text_sm().text_color(rgb(0x0094_a3b8)).child(format!(
+                        "{:?} · {} CPUs · {} GiB",
+                        instance.state,
+                        instance.resources.cpu_hardware_ids.len(),
+                        gib(instance.resources.memory_bytes)
+                    ))),
+            )
+            .children(action)
+    }
+
     #[allow(clippy::too_many_lines)]
-    fn main_content(&self) -> impl IntoElement {
+    fn main_content(&self, cx: &mut Context<Self>) -> impl IntoElement {
         match self.model.data() {
             DataState::Loading => {
                 panel("Connecting to host", "Waiting for the management gateway.")
@@ -130,15 +233,7 @@ impl ManagementShell {
                         "Peer-kernel lifecycle and assigned resources",
                     ))
                     .children(snapshot.host.instances.iter().map(|instance| {
-                        panel(
-                            format!("{} · {}", instance.name, instance.id.0),
-                            format!(
-                                "{:?} · {} CPUs · {} GiB",
-                                instance.state,
-                                instance.resources.cpu_hardware_ids.len(),
-                                gib(instance.resources.memory_bytes)
-                            ),
-                        )
+                        self.instance_panel(instance, snapshot.host.generation, cx)
                     })),
                 Section::Images => div()
                     .flex()
@@ -236,7 +331,7 @@ impl Render for ManagementShell {
                             .min_w_0()
                             .overflow_y_scroll()
                             .p_5()
-                            .child(self.main_content()),
+                            .child(self.main_content(cx)),
                     ),
             )
     }
@@ -361,5 +456,18 @@ pub fn fail_management_shell(message: String, cx: &mut App) {
                 cx.notify();
             });
         }
+    });
+}
+
+/// Installs the browser transport adapter for renderer-neutral user intents.
+///
+/// # Panics
+/// Panics when configured more than once in the same document.
+pub fn set_intent_handler(handler: Rc<dyn Fn(Intent)>) {
+    INTENT_HANDLER.with(|slot| {
+        assert!(
+            slot.set(handler).is_ok(),
+            "intent handler already configured"
+        );
     });
 }
