@@ -138,6 +138,14 @@ impl ManagementModel {
         self.pending_intent = None;
     }
 
+    /// Releases an action that failed before a replacement snapshot arrived.
+    ///
+    /// The last authoritative snapshot remains visible so clients can present
+    /// a recoverable action error without turning the whole host unavailable.
+    pub fn reject_pending(&mut self) {
+        self.pending_intent = None;
+    }
+
     /// Queues one intent after checking it against the current authoritative state.
     ///
     /// # Errors
@@ -396,6 +404,22 @@ mod tests {
         );
 
         model.replace_snapshot(snapshot());
+        model.request(intent).unwrap();
+    }
+
+    #[test]
+    fn rejected_action_keeps_authoritative_data_available() {
+        let mut model = ManagementModel::from_snapshot(snapshot());
+        let intent = Intent::StopInstance {
+            id: InstanceId(2),
+            expected_generation: Generation(7),
+            force: false,
+        };
+        model.request(intent.clone()).unwrap();
+
+        model.reject_pending();
+
+        assert!(matches!(model.data(), DataState::Ready(_)));
         model.request(intent).unwrap();
     }
 }
