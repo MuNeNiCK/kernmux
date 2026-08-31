@@ -1,10 +1,9 @@
 [Unit]
-Description=Kernmux local web management gateway
+Description=Kernmux local management API gateway
 Documentation=https://github.com/MuNeNiCK/kernmux
 After=network.target kernmuxd.service
 Wants=kernmuxd.service
 ConditionPathExists=/etc/kernmux/gateway.token
-ConditionPathExists=/usr/share/kernmux/web/index.html
 
 [Service]
 Type=simple

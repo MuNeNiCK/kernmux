@@ -14,7 +14,6 @@ The v0.1 host service provides:
 - asynchronous operations with generation preconditions and reconciliation;
 - a privileged daemon, an unprivileged automation client, and a versioned
   local API;
-- an authenticated local host-management console;
 - release compatibility preflight and daemon-independent host diagnostics.
 
 Kernmux is not a desktop application, a GUI toolkit product, a hypervisor, a
@@ -26,7 +25,7 @@ not a production-ready release.
 ```text
 kernmuxctl ───────────────┐
                          │ HTTP/JSON over Unix socket
-browser ─ kernmux-gateway ┤
+local API client ─ gateway┤
                          ▼
                     kernmuxd (root)
                          │ validated, bounded execution
@@ -36,7 +35,7 @@ browser ─ kernmux-gateway ┤
                                    peer kernels
 ```
 
-The GUI, CLI, and any future remote gateway are clients of the same management
+The CLI and any future management clients use the same management
 plane. The privileged daemon has no registry credentials and does not pull
 images from the network. See [Architecture](docs/architecture.md) for the
 security and bundle-acquisition boundaries.
@@ -63,13 +62,6 @@ sudo systemctl start kernmuxd
 sudo kernmuxctl --pretty host preflight
 ```
 
-The package also starts the loopback-only management console on port 9443.
-Print a one-time launch URL without storing the credential in browser storage:
-
-```sh
-sudo sh -c 'printf "http://127.0.0.1:9443/#token="; tr -d "\n" < /etc/kernmux/gateway.token; printf "\n"'
-```
-
 Installation enables the service but deliberately does not force-start it.
 systemd starts it only when Multikernel sysfs and the release contract are
 present and Kerf is executable. API authorization is deny-by-default; root is
@@ -81,13 +73,11 @@ and safe recovery procedure.
 
 ## Build and test
 
-Rust 1.98.0 is pinned by `rust-toolchain.toml`. The browser console also
-requires Node.js and pnpm for source builds.
+Rust 1.98.0 is pinned by `rust-toolchain.toml`.
 
 ```sh
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
-scripts/build-web.sh
 ```
 
 On an Ubuntu build VM with `dpkg-deb` and the
@@ -118,7 +108,7 @@ packaging/release/build.sh
 ## v0.1 limitations
 
 - one local host; no clustering, HA, live migration, or remote API listener;
-- local single-host console only; no multi-host inventory or remote identity provider;
+- no web management client, multi-host inventory, or remote identity provider;
 - no kernel, Lazy CMA, DAXFS, or Kerf installation automation;
 - no registry acquisition in the privileged daemon;
 - imported image garbage collection is not yet exposed;

@@ -38,13 +38,10 @@ export SOURCE_DATE_EPOCH=$source_date_epoch
 export KERNMUX_PACKAGE_VERSION="${release_version}-${package_revision}"
 export KERNMUX_OUTPUT_DIR=$output_dir
 export KERNMUX_RUST_TARGET=$rust_target
-export KERNMUX_WEB_USE_PREBUILT=1
-
 if [ "$use_prebuilt" -eq 0 ]; then
     cargo build --locked --release --target "$rust_target" \
         --manifest-path "$repo_root/Cargo.toml" \
         -p kernmux-daemon -p kernmux-cli -p kernmux-gateway
-    "$repo_root/scripts/build-web.sh"
 else
     for binary in kernmuxd kernmuxctl kernmux-gateway; do
         test -x "$repo_root/target/$rust_target/release/$binary" || {
@@ -52,10 +49,6 @@ else
             exit 4
         }
     done
-    test -f "$repo_root/dist/web/index.html" || {
-        echo "missing prebuilt web entrypoint: index.html" >&2
-        exit 4
-    }
 fi
 
 install -d "$output_dir"
