@@ -4,3 +4,7 @@
 
 # Locally built distribution artifacts.
 /dist/
+
+# Frontend dependency and incremental build output.
+/console-ui/node_modules/
+/console-ui/tsconfig.tsbuildinfo

@@ -13,15 +13,15 @@ for path in \
     ./lib/systemd/system/kernmuxd.service \
     ./lib/systemd/system/kernmux-gateway.service \
     ./usr/share/kernmux/web/index.html \
-    ./usr/share/kernmux/web/bootstrap.js \
-    ./usr/share/kernmux/web/app.js \
-    ./usr/share/kernmux/web/app_bg.wasm \
     ./etc/kernmux/kernmuxd.env \
     ./etc/kernmux/release.json \
     ./usr/share/doc/kernmux/copyright
 do
     printf '%s\n' "$contents" | grep -F " $path" >/dev/null
 done
+
+printf '%s\n' "$contents" | grep -E ' ./usr/share/kernmux/web/assets/[^ ]+\.js$' >/dev/null
+printf '%s\n' "$contents" | grep -E ' ./usr/share/kernmux/web/assets/[^ ]+\.css$' >/dev/null
 
 control_dir=$(mktemp -d)
 trap 'rm -rf -- "$control_dir"' EXIT HUP INT TERM

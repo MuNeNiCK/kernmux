@@ -99,14 +99,9 @@ try {
   await loaded;
   try {
     await waitFor(async () => {
-      const dimensions = await evaluate(cdp, sessionId, `(() => {
-        const canvas = document.querySelector("canvas");
-        return canvas && canvas.clientWidth > 0 && canvas.clientHeight > 0
-          ? [canvas.clientWidth, canvas.clientHeight]
-          : null;
-      })()`);
-      return dimensions;
-    }, "management canvas did not render");
+      return evaluate(cdp, sessionId,
+        `Boolean(document.querySelector('[data-testid="app-shell"]'))`);
+    }, "management console did not render");
   } catch (error) {
     const documentState = await evaluate(cdp, sessionId,
       "({readyState: document.readyState, body: document.body.innerHTML})");
@@ -119,13 +114,9 @@ try {
   assert.equal(await evaluate(cdp, sessionId, "location.hash"), "");
   assert.equal(await evaluate(cdp, sessionId, "localStorage.length"), 0);
   assert.equal(await evaluate(cdp, sessionId, "sessionStorage.length"), 0);
-  const initialDimensions = await evaluate(cdp, sessionId, `(() => {
-    const canvas = document.querySelector("canvas");
-    return [canvas.clientWidth, canvas.clientHeight, innerWidth, innerHeight];
-  })()`);
-  assert.equal(initialDimensions[0], initialDimensions[2]);
-  assert.equal(initialDimensions[1], initialDimensions[3]);
-  assert.deepEqual(initialDimensions, [1280, 800, 1280, 800]);
+  const initialDimensions = await evaluate(cdp, sessionId,
+    "[document.documentElement.scrollWidth, innerWidth, innerHeight]");
+  assert.deepEqual(initialDimensions, [1280, 1280, 800]);
 
   if (screenshotPath) {
     const { data } = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
@@ -137,29 +128,37 @@ try {
     await writeFile(screenshotPath, Buffer.from(data, "base64"));
   }
 
-  // Exercise the authenticated browser-to-gateway mutation path independently
-  // of canvas coordinates; component interaction is covered by the UI model.
-  const accepted = await evaluate(cdp, sessionId, `(async () => {
-    const response = await fetch("/api/1.0/instances/1", {
-      method: "DELETE",
-      headers: {
-        "Authorization": "Bearer ${token}",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ expected_generation: 7 }),
-    });
-    return { status: response.status, body: await response.json() };
-  })()`);
-  assert.equal(accepted.status, 202);
-  assert.equal(accepted.body.operation.id, "op-delete-1");
-  const completed = await evaluate(cdp, sessionId, `(async () => {
-    const response = await fetch("/api/1.0/operations/op-delete-1", {
-      headers: { "Authorization": "Bearer ${token}" },
-    });
-    return { status: response.status, body: await response.json() };
-  })()`);
-  assert.equal(completed.status, 200);
-  assert.equal(completed.body.data.state, "succeeded");
+  await waitFor(() => evaluate(cdp, sessionId,
+    `Boolean(document.querySelector('[data-testid="nav-instance-1"]'))`),
+  "fixture instance did not appear in inventory");
+  await clickTestId(cdp, sessionId, "nav-instance-1");
+  await waitFor(() => evaluate(cdp, sessionId,
+    `document.querySelector('.object-heading h1')?.textContent === 'lab'`),
+  "instance detail did not open");
+  await clickTestId(cdp, sessionId, "tab-manage");
+  try {
+    await waitFor(() => evaluate(cdp, sessionId,
+      `Boolean(document.querySelector('[data-testid="action-delete"]'))`),
+    "instance management actions did not render");
+  } catch (error) {
+    const state = await evaluate(cdp, sessionId, `({
+      title: document.querySelector('.object-heading h1')?.textContent,
+      tabs: [...document.querySelectorAll('[role="tab"]')].map(tab => [tab.textContent, tab.getAttribute('aria-selected')]),
+      content: document.querySelector('.content')?.textContent,
+    })`);
+    throw new Error(`${error.message}: ${JSON.stringify(state)}`);
+  }
+  await clickTestId(cdp, sessionId, "action-delete");
+  await waitFor(() => evaluate(cdp, sessionId,
+    `Boolean(document.querySelector('[data-testid="confirm-delete"]'))`),
+  "delete confirmation did not open");
+  await clickTestId(cdp, sessionId, "confirm-delete");
+  await waitFor(() => requests.some((request) =>
+    request.method === "DELETE" && request.path === "/1.0/instances/1"),
+  "delete action did not reach the daemon");
+  await waitFor(() => requests.some((request) =>
+    request.method === "GET" && request.path === "/1.0/operations/op-delete-1"),
+  "accepted operation was not polled");
   const mutation = requests.find((request) =>
     request.method === "DELETE" && request.path === "/1.0/instances/1");
   assert.deepEqual(JSON.parse(mutation.body), { expected_generation: 7 });
@@ -171,12 +170,10 @@ try {
     mobile: false,
   }, sessionId);
   await waitFor(async () => {
-    const dimensions = await evaluate(cdp, sessionId, `(() => {
-      const canvas = document.querySelector("canvas");
-      return [canvas.clientWidth, canvas.clientHeight, innerWidth, innerHeight];
-    })()`);
-    return dimensions.every((value, index) => value === [900, 650, 900, 650][index]);
-  }, "management canvas did not follow the viewport");
+    const dimensions = await evaluate(cdp, sessionId,
+      "[document.documentElement.scrollWidth, innerWidth, innerHeight]");
+    return dimensions[0] <= dimensions[1] && dimensions[1] === 900 && dimensions[2] === 650;
+  }, "management console overflows the viewport");
 
   if (screenshotPath) {
     const { data } = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
@@ -435,6 +432,16 @@ async function evaluate(cdp, sessionId, expression) {
   }, sessionId);
   if (response.exceptionDetails) throw new Error(response.exceptionDetails.text);
   return response.result.value;
+}
+
+async function clickTestId(cdp, sessionId, testId) {
+  const clicked = await evaluate(cdp, sessionId, `(() => {
+    const element = document.querySelector('[data-testid="${testId}"]');
+    if (!element) return false;
+    element.click();
+    return true;
+  })()`);
+  assert.equal(clicked, true, `missing UI control: ${testId}`);
 }
 
 async function click(cdp, sessionId, x, y) {

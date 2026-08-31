@@ -52,12 +52,10 @@ else
             exit 4
         }
     done
-    for asset in index.html bootstrap.js app.js app_bg.wasm; do
-        test -f "$repo_root/dist/web/$asset" || {
-            echo "missing explicit prebuilt web asset: $asset" >&2
-            exit 4
-        }
-    done
+    test -f "$repo_root/dist/web/index.html" || {
+        echo "missing prebuilt web entrypoint: index.html" >&2
+        exit 4
+    }
 fi
 
 install -d "$output_dir"

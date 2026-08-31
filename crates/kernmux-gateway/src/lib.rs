@@ -276,14 +276,18 @@ where
         if request.method() != Method::GET && request.method() != Method::HEAD {
             return error_response(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
         }
-        let (relative, content_type) = match request.uri().path() {
-            "/" | "/index.html" => ("index.html", "text/html; charset=utf-8"),
-            "/bootstrap.js" => ("bootstrap.js", "text/javascript; charset=utf-8"),
-            "/app.js" => ("app.js", "text/javascript; charset=utf-8"),
-            "/app_bg.wasm" => ("app_bg.wasm", "application/wasm"),
+        let Some(relative) = static_relative_path(request.uri().path()) else {
+            return error_response(StatusCode::NOT_FOUND, "not_found");
+        };
+        let Ok(root) = tokio::fs::canonicalize(&self.config.assets_dir).await else {
+            return error_response(StatusCode::NOT_FOUND, "not_found");
+        };
+        let requested = self.config.assets_dir.join(&relative);
+        let path = match tokio::fs::canonicalize(&requested).await {
+            Ok(path) if path.starts_with(&root) => path,
+            _ if relative.extension().is_none() => root.join("index.html"),
             _ => return error_response(StatusCode::NOT_FOUND, "not_found"),
         };
-        let path = self.config.assets_dir.join(relative);
         let metadata = match tokio::fs::symlink_metadata(&path).await {
             Ok(metadata) if metadata.is_file() && metadata.len() <= DEFAULT_MAX_STATIC_BYTES => {
                 metadata
@@ -298,7 +302,42 @@ where
                 _ => return error_response(StatusCode::NOT_FOUND, "not_found"),
             }
         };
-        secure_response(StatusCode::OK, body, content_type)
+        secure_response(StatusCode::OK, body, static_content_type(&path))
+    }
+}
+
+fn static_relative_path(path: &str) -> Option<PathBuf> {
+    if path == "/" {
+        return Some(PathBuf::from("index.html"));
+    }
+    let relative = path.strip_prefix('/')?;
+    if relative.is_empty()
+        || relative.contains('%')
+        || relative.contains('\\')
+        || relative
+            .split('/')
+            .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+    {
+        return None;
+    }
+    Some(PathBuf::from(relative))
+}
+
+fn static_content_type(path: &Path) -> &'static str {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json" | "map") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("ico") => "image/x-icon",
+        Some("woff") => "font/woff",
+        Some("woff2") => "font/woff2",
+        Some("wasm") => "application/wasm",
+        _ => "application/octet-stream",
     }
 }
 
@@ -429,7 +468,7 @@ fn secure_response(
         .status(status)
         .header(CONTENT_TYPE, content_type)
         .header("cache-control", "no-store")
-        .header("content-security-policy", "default-src 'self'; connect-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        .header("content-security-policy", "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         .header("referrer-policy", "no-referrer")
         .header("x-content-type-options", "nosniff")
         .body(Full::new(Bytes::from(body)))
@@ -544,6 +583,22 @@ mod tests {
             .is_none()
         );
         assert!(daemon_path(&Method::GET, &"/api/1.0/../secret".parse().unwrap()).is_none());
+    }
+
+    #[test]
+    fn static_assets_allow_vite_outputs_without_path_traversal() {
+        assert_eq!(static_relative_path("/"), Some(PathBuf::from("index.html")));
+        assert_eq!(
+            static_relative_path("/assets/index-a1b2c3.js"),
+            Some(PathBuf::from("assets/index-a1b2c3.js"))
+        );
+        assert!(static_relative_path("/assets/../secret").is_none());
+        assert!(static_relative_path("/assets/%2e%2e/secret").is_none());
+        assert!(static_relative_path("//server/share").is_none());
+        assert_eq!(
+            static_content_type(Path::new("assets/app.css")),
+            "text/css; charset=utf-8"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

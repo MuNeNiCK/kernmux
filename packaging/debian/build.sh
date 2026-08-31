@@ -41,12 +41,10 @@ fi
 if [ "$use_prebuilt_web" -eq 0 ]; then
     "$repo_root/scripts/build-web.sh"
 else
-    for asset in index.html bootstrap.js app.js app_bg.wasm; do
-        test -f "$web_assets/$asset" || {
-            echo "missing explicit prebuilt web asset: $asset" >&2
-            exit 4
-        }
-    done
+    test -f "$web_assets/index.html" || {
+        echo "missing prebuilt web entrypoint: index.html" >&2
+        exit 4
+    }
 fi
 
 stage=$(mktemp -d)
@@ -59,10 +57,9 @@ install -d "$stage/etc/kernmux" "$stage/usr/share/doc/kernmux" \
 install -m 0755 "$daemon_binary" "$stage/usr/bin/kernmuxd"
 install -m 0755 "$client_binary" "$stage/usr/bin/kernmuxctl"
 install -m 0755 "$gateway_binary" "$stage/usr/bin/kernmux-gateway"
-install -m 0644 "$web_assets/index.html" "$stage/usr/share/kernmux/web/index.html"
-install -m 0644 "$web_assets/bootstrap.js" "$stage/usr/share/kernmux/web/bootstrap.js"
-install -m 0644 "$web_assets/app.js" "$stage/usr/share/kernmux/web/app.js"
-install -m 0644 "$web_assets/app_bg.wasm" "$stage/usr/share/kernmux/web/app_bg.wasm"
+cp -R "$web_assets/." "$stage/usr/share/kernmux/web/"
+find "$stage/usr/share/kernmux/web" -type d -exec chmod 0755 {} +
+find "$stage/usr/share/kernmux/web" -type f -exec chmod 0644 {} +
 install -m 0644 "$repo_root/packaging/systemd/kernmuxd.service" \
     "$stage/lib/systemd/system/kernmuxd.service"
 install -m 0644 "$repo_root/packaging/systemd/kernmux-gateway.service" \
