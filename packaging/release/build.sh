@@ -52,7 +52,7 @@ else
             exit 4
         }
     done
-    for asset in index.html app.js app_bg.wasm; do
+    for asset in index.html bootstrap.js app.js app_bg.wasm; do
         test -f "$repo_root/dist/web/$asset" || {
             echo "missing explicit prebuilt web asset: $asset" >&2
             exit 4

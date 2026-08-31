@@ -278,6 +278,7 @@ where
         }
         let (relative, content_type) = match request.uri().path() {
             "/" | "/index.html" => ("index.html", "text/html; charset=utf-8"),
+            "/bootstrap.js" => ("bootstrap.js", "text/javascript; charset=utf-8"),
             "/app.js" => ("app.js", "text/javascript; charset=utf-8"),
             "/app_bg.wasm" => ("app_bg.wasm", "application/wasm"),
             _ => return error_response(StatusCode::NOT_FOUND, "not_found"),
@@ -428,7 +429,7 @@ fn secure_response(
         .status(status)
         .header(CONTENT_TYPE, content_type)
         .header("cache-control", "no-store")
-        .header("content-security-policy", "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
+        .header("content-security-policy", "default-src 'self'; connect-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         .header("referrer-policy", "no-referrer")
         .header("x-content-type-options", "nosniff")
         .body(Full::new(Bytes::from(body)))

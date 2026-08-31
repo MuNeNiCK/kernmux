@@ -31,3 +31,4 @@ install -d "$repo_root/dist/web"
   --out-dir "$repo_root/dist/web" \
   --out-name app
 install -m 0644 "$repo_root/web/index.html" "$repo_root/dist/web/index.html"
+install -m 0644 "$repo_root/web/bootstrap.js" "$repo_root/dist/web/bootstrap.js"

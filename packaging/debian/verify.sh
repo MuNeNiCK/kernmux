@@ -13,6 +13,7 @@ for path in \
     ./lib/systemd/system/kernmuxd.service \
     ./lib/systemd/system/kernmux-gateway.service \
     ./usr/share/kernmux/web/index.html \
+    ./usr/share/kernmux/web/bootstrap.js \
     ./usr/share/kernmux/web/app.js \
     ./usr/share/kernmux/web/app_bg.wasm \
     ./etc/kernmux/kernmuxd.env \

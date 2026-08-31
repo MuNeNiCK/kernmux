@@ -41,7 +41,7 @@ fi
 if [ "$use_prebuilt_web" -eq 0 ]; then
     "$repo_root/scripts/build-web.sh"
 else
-    for asset in index.html app.js app_bg.wasm; do
+    for asset in index.html bootstrap.js app.js app_bg.wasm; do
         test -f "$web_assets/$asset" || {
             echo "missing explicit prebuilt web asset: $asset" >&2
             exit 4
@@ -60,6 +60,7 @@ install -m 0755 "$daemon_binary" "$stage/usr/bin/kernmuxd"
 install -m 0755 "$client_binary" "$stage/usr/bin/kernmuxctl"
 install -m 0755 "$gateway_binary" "$stage/usr/bin/kernmux-gateway"
 install -m 0644 "$web_assets/index.html" "$stage/usr/share/kernmux/web/index.html"
+install -m 0644 "$web_assets/bootstrap.js" "$stage/usr/share/kernmux/web/bootstrap.js"
 install -m 0644 "$web_assets/app.js" "$stage/usr/share/kernmux/web/app.js"
 install -m 0644 "$web_assets/app_bg.wasm" "$stage/usr/share/kernmux/web/app_bg.wasm"
 install -m 0644 "$repo_root/packaging/systemd/kernmuxd.service" \
