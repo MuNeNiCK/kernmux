@@ -1,0 +1,41 @@
+[Unit]
+Description=Kernmux local web management gateway
+Documentation=https://github.com/MuNeNiCK/kernmux
+After=network.target kernmuxd.service
+Wants=kernmuxd.service
+ConditionPathExists=/etc/kernmux/gateway.token
+ConditionPathExists=/usr/share/kernmux/web/index.html
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/kernmux-gateway
+User=kernmux-web
+Group=kernmux
+UMask=0077
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s
+LimitNOFILE=1024
+
+NoNewPrivileges=yes
+PrivateDevices=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

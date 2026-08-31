@@ -38,15 +38,23 @@ export SOURCE_DATE_EPOCH=$source_date_epoch
 export KERNMUX_PACKAGE_VERSION="${release_version}-${package_revision}"
 export KERNMUX_OUTPUT_DIR=$output_dir
 export KERNMUX_RUST_TARGET=$rust_target
+export KERNMUX_WEB_USE_PREBUILT=1
 
 if [ "$use_prebuilt" -eq 0 ]; then
     cargo build --locked --release --target "$rust_target" \
         --manifest-path "$repo_root/Cargo.toml" \
-        -p kernmux-daemon -p kernmux-cli
+        -p kernmux-daemon -p kernmux-cli -p kernmux-gateway
+    "$repo_root/scripts/build-web.sh"
 else
-    for binary in kernmuxd kernmuxctl; do
+    for binary in kernmuxd kernmuxctl kernmux-gateway; do
         test -x "$repo_root/target/$rust_target/release/$binary" || {
             echo "missing explicit prebuilt binary: $binary" >&2
+            exit 4
+        }
+    done
+    for asset in index.html app.js app_bg.wasm; do
+        test -f "$repo_root/dist/web/$asset" || {
+            echo "missing explicit prebuilt web asset: $asset" >&2
             exit 4
         }
     done

@@ -29,7 +29,7 @@ const DEFAULT_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_STATIC_BYTES: u64 = 32 * 1024 * 1024;
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GatewayConfig {
     pub bind: SocketAddr,
     pub allow_non_loopback: bool,
@@ -38,6 +38,21 @@ pub struct GatewayConfig {
     pub assets_dir: PathBuf,
     pub max_request_bytes: usize,
     pub max_connections: usize,
+}
+
+impl std::fmt::Debug for GatewayConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayConfig")
+            .field("bind", &self.bind)
+            .field("allow_non_loopback", &self.allow_non_loopback)
+            .field("bearer_token", &"[REDACTED]")
+            .field("allowed_origins", &self.allowed_origins)
+            .field("assets_dir", &self.assets_dir)
+            .field("max_request_bytes", &self.max_request_bytes)
+            .field("max_connections", &self.max_connections)
+            .finish()
+    }
 }
 
 impl GatewayConfig {

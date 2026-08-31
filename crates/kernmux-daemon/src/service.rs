@@ -85,6 +85,7 @@ impl DaemonConfig {
         for gid in id_list(&mut lookup, "KERNMUX_ADMINISTRATOR_GIDS")? {
             authorization = authorization.with_administrator_gid(gid);
         }
+        authorization = with_named_groups(authorization, &mut lookup)?;
 
         override_usize(
             &mut lookup,
@@ -205,6 +206,71 @@ fn id_list(
                 .map_err(|_| config_error("identity list is invalid"))
         })
         .collect()
+}
+
+fn name_list(
+    lookup: &mut impl FnMut(&str) -> Option<OsString>,
+    name: &str,
+) -> Result<Vec<String>, ApiError> {
+    let Some(value) = optional_string(lookup, name)? else {
+        return Ok(Vec::new());
+    };
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .map(str::trim)
+        .map(|part| {
+            if part.is_empty()
+                || part
+                    .chars()
+                    .any(|character| character == ':' || character.is_whitespace())
+            {
+                Err(config_error("group name list is invalid"))
+            } else {
+                Ok(part.to_owned())
+            }
+        })
+        .collect()
+}
+
+fn with_named_groups(
+    mut authorization: AuthorizationPolicy,
+    lookup: &mut impl FnMut(&str) -> Option<OsString>,
+) -> Result<AuthorizationPolicy, ApiError> {
+    let reader_groups = name_list(lookup, "KERNMUX_READER_GROUPS")?;
+    let operator_groups = name_list(lookup, "KERNMUX_OPERATOR_GROUPS")?;
+    let administrator_groups = name_list(lookup, "KERNMUX_ADMINISTRATOR_GROUPS")?;
+    if reader_groups.is_empty() && operator_groups.is_empty() && administrator_groups.is_empty() {
+        return Ok(authorization);
+    }
+    let database = std::fs::read_to_string("/etc/group")
+        .map_err(|_| config_error("local group database is unavailable"))?;
+    for name in reader_groups {
+        authorization = authorization.with_reader_gid(resolve_group(&database, &name)?);
+    }
+    for name in operator_groups {
+        authorization = authorization.with_operator_gid(resolve_group(&database, &name)?);
+    }
+    for name in administrator_groups {
+        authorization = authorization.with_administrator_gid(resolve_group(&database, &name)?);
+    }
+    Ok(authorization)
+}
+
+fn resolve_group(database: &str, requested: &str) -> Result<u32, ApiError> {
+    database
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split(':');
+            let name = fields.next()?;
+            let _password = fields.next()?;
+            let gid = fields.next()?;
+            (name == requested).then_some(gid)
+        })
+        .and_then(|gid| gid.parse().ok())
+        .ok_or_else(|| config_error("configured local group does not exist"))
 }
 
 fn parse_bool(value: &str) -> Result<bool, ApiError> {
@@ -363,5 +429,18 @@ mod tests {
             })
             .is_err()
         );
+        assert!(
+            DaemonConfig::from_lookup(|name| {
+                (name == "KERNMUX_OPERATOR_GROUPS").then(|| "invalid group".into())
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn local_group_names_resolve_without_running_commands() {
+        let database = "root:x:0:\nkernmux:x:417:\n";
+        assert_eq!(resolve_group(database, "kernmux").unwrap(), 417);
+        assert!(resolve_group(database, "missing").is_err());
     }
 }
