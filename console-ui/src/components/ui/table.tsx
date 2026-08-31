@@ -1,10 +1,130 @@
 import type { ComponentProps } from "solid-js"
 import { splitProps } from "solid-js"
-import { cn } from "@/lib/utils"
 
-export function Table(props: ComponentProps<"table">) { const [local, rest] = splitProps(props, ["class"]); return <table class={cn("w-full border-collapse text-sm", local.class)} {...rest} /> }
-export function TableHeader(props: ComponentProps<"thead">) { const [local, rest] = splitProps(props, ["class"]); return <thead class={cn("border-b border-slate-300 bg-slate-50", local.class)} {...rest} /> }
-export function TableBody(props: ComponentProps<"tbody">) { const [local, rest] = splitProps(props, ["class"]); return <tbody class={cn("divide-y divide-slate-200", local.class)} {...rest} /> }
-export function TableRow(props: ComponentProps<"tr">) { const [local, rest] = splitProps(props, ["class"]); return <tr class={cn("hover:bg-slate-50", local.class)} {...rest} /> }
-export function TableHead(props: ComponentProps<"th">) { const [local, rest] = splitProps(props, ["class"]); return <th class={cn("h-9 px-3 text-left text-xs font-semibold text-slate-600", local.class)} {...rest} /> }
-export function TableCell(props: ComponentProps<"td">) { const [local, rest] = splitProps(props, ["class"]); return <td class={cn("px-3 py-2.5 align-middle text-slate-800", local.class)} {...rest} /> }
+import { cx } from "@/lib/cva"
+
+export type TableProps = ComponentProps<"table">
+
+export const Table = (props: TableProps) => {
+  const [, rest] = splitProps(props, ["class"])
+
+  return (
+    <div data-slot="table-container" class="relative w-full overflow-x-auto">
+      <table
+        data-slot="table"
+        class={cx("w-full caption-bottom text-sm", props.class)}
+        {...rest}
+      />
+    </div>
+  )
+}
+
+export type TableHeaderProps = ComponentProps<"thead">
+
+export const TableHeader = (props: TableHeaderProps) => {
+  const [, rest] = splitProps(props, ["class"])
+
+  return (
+    <thead
+      data-slot="table-header"
+      class={cx("[&_tr]:border-b [&_tr]:border-border", props.class)}
+      {...rest}
+    />
+  )
+}
+
+export type TableBodyProps = ComponentProps<"tbody">
+
+export const TableBody = (props: TableBodyProps) => {
+  const [, rest] = splitProps(props, ["class"])
+
+  return (
+    <tbody
+      data-slot="table-body"
+      class={cx("[&_tr:last-child]:border-0", props.class)}
+      {...rest}
+    />
+  )
+}
+
+export type TableFooterProps = ComponentProps<"tfoot">
+
+export const TableFooter = (props: TableFooterProps) => {
+  const [, rest] = splitProps(props, ["class"])
+
+  return (
+    <tfoot
+      data-slot="table-footer"
+      class={cx(
+        "border-t bg-transparent font-medium [&>tr]:last:border-b-0",
+        props.class,
+      )}
+      {...rest}
+    />
+  )
+}
+
+export type TableRowProps = ComponentProps<"tr">
+
+export const TableRow = (props: TableRowProps) => {
+  const [, rest] = splitProps(props, ["class"])
+
+  return (
+    <tr
+      data-slot="table-row"
+      class={cx(
+        "border-b border-border/80 transition-colors hover:bg-accent/50 has-aria-expanded:bg-accent/50 data-[state=selected]:bg-accent",
+        props.class,
+      )}
+      {...rest}
+    />
+  )
+}
+
+export type TableHeadProps = ComponentProps<"th">
+
+export const TableHead = (props: TableHeadProps) => {
+  const [, rest] = splitProps(props, ["class"])
+
+  return (
+    <th
+      data-slot="table-head"
+      class={cx(
+        "h-11 px-3 text-left align-middle text-xs font-semibold whitespace-nowrap text-foreground/80 [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
+        props.class,
+      )}
+      {...rest}
+    />
+  )
+}
+
+export type TableCellProps = ComponentProps<"td">
+
+export const TableCell = (props: TableCellProps) => {
+  const [, rest] = splitProps(props, ["class"])
+
+  return (
+    <td
+      data-slot="table-cell"
+      class={cx(
+        "p-3 align-middle whitespace-nowrap [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
+        props.class,
+      )}
+      {...rest}
+    />
+  )
+}
+
+export type TableCaptionProps = ComponentProps<"caption">
+
+export const TableCaption = (props: TableCaptionProps) => {
+  const [, rest] = splitProps(props, ["class"])
+
+  return (
+    <caption
+      data-slot="table-caption"
+      class={cx("text-muted-foreground mt-4 text-sm", props.class)}
+      {...rest}
+    />
+  )
+}

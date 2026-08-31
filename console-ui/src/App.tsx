@@ -1,12 +1,12 @@
-import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { For, Match, Show, Switch, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import { Activity, Box, ChevronRight, CircleGauge, Cpu, HardDrive, Image, Layers3, RefreshCw, Server, Trash2 } from "lucide-solid"
 import { ApiClient, type HostSnapshot, type ImageArtifact, type Instance, type Operation } from "./api"
 import { consumeFragmentToken } from "./auth"
 import { Badge } from "./components/ui/badge"
 import { Button } from "./components/ui/button"
-import { Separator } from "./components/ui/separator"
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogPortal, AlertDialogTitle } from "./components/ui/alert-dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table"
-import { TabsList, TabsTrigger } from "./components/ui/tabs"
+import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs"
 
 type ObjectSelection = { kind: "host" } | { kind: "instance"; id: number } | { kind: "images" } | { kind: "operations" }
 type Tab = "summary" | "monitor" | "manage"
@@ -14,7 +14,7 @@ const bytes = new Intl.NumberFormat(undefined, { style: "unit", unit: "gigabyte"
 const dateTime = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "medium" })
 const formatBytes = (value: number) => bytes.format(value / 2 ** 30)
 const titleCase = (value: string) => value.replaceAll("_", " ").replace(/\b\w/g, letter => letter.toUpperCase())
-const badgeVariant = (state: string) => ["healthy", "active", "succeeded", "applied", "loaded"].includes(state) ? "success" : ["failed", "indeterminate"].includes(state) ? "destructive" : ["running", "queued", "warning"].includes(state) ? "warning" : "default"
+const badgeVariant = (state: string) => ["healthy", "active", "succeeded", "applied", "loaded"].includes(state) ? "default" : ["failed", "indeterminate"].includes(state) ? "destructive" : "outline"
 
 function initialNavigation(): { selection: ObjectSelection; tab: Tab } {
   const params = new URLSearchParams(window.location.search)
@@ -43,7 +43,6 @@ function parseCpuList(value: string): number[] {
 
 export function App() {
   const initial = initialNavigation()
-  let deleteConfirmButton: HTMLButtonElement | undefined
   const [client, setClient] = createSignal<ApiClient>()
   const [host, setHost] = createSignal<HostSnapshot>()
   const [images, setImages] = createSignal<ImageArtifact[]>([])
@@ -58,13 +57,6 @@ export function App() {
     return current.kind === "instance" ? host()?.instances.find(instance => instance.id === current.id) : undefined
   })
 
-  createEffect(() => {
-    if (!confirmDelete()) return
-    const close = (event: KeyboardEvent) => { if (event.key === "Escape") setConfirmDelete(false) }
-    document.addEventListener("keydown", close)
-    queueMicrotask(() => deleteConfirmButton?.focus())
-    onCleanup(() => document.removeEventListener("keydown", close))
-  })
 
   async function refresh(silent = false) {
     const api = client()
@@ -107,7 +99,7 @@ export function App() {
 
   return <div class="app-shell" data-testid="app-shell">
     <a class="skip-link" href="#main-content">Skip to Main Content</a>
-    <header class="topbar"><div class="brand"><span class="brand-mark">K</span><strong>Kernmux</strong><span>Host Client</span></div><div class="top-status"><Badge variant={host()?.health === "healthy" ? "success" : "warning"}>{host() ? titleCase(host()!.health) : "Connecting"}</Badge><span>Local administration</span></div></header>
+    <header class="topbar"><div class="brand"><span class="brand-mark">K</span><strong>Kernmux</strong><span>Host Client</span></div><div class="top-status"><Badge variant={host()?.health === "healthy" ? "default" : "outline"}>{host() ? titleCase(host()!.health) : "Connecting"}</Badge><span>Local administration</span></div></header>
     <aside class="inventory" aria-label="Inventory">
       <div class="inventory-heading"><strong>Navigator</strong><span>Single host inventory</span></div>
       <nav>
@@ -131,9 +123,11 @@ export function App() {
         <div class="object-heading"><p>{selection().kind === "instance" ? "Virtual Kernel" : "Kernmux"}</p><h1>{objectTitle()}</h1></div>
         <div class="toolbar"><Button variant="outline" onClick={() => void refresh()} disabled={busy()}><RefreshCw aria-hidden="true" />Refresh</Button><InstanceToolbar instance={selectedInstance()} busy={busy()} mutate={mutate} /></div>
       </section>
-      <TabsList aria-label="Object views">
-        <For each={["summary", "monitor", "manage"] as Tab[]}>{name => <TabsTrigger active={tab() === name} data-testid={`tab-${name}`} onClick={() => navigate(selection(), name)}>{titleCase(name)}</TabsTrigger>}</For>
-      </TabsList>
+      <Tabs value={tab()} onChange={value => navigate(selection(), value as Tab)}>
+        <TabsList aria-label="Object views">
+          <For each={["summary", "monitor", "manage"] as Tab[]}>{name => <TabsTrigger value={name} data-testid={`tab-${name}`}>{titleCase(name)}</TabsTrigger>}</For>
+        </TabsList>
+      </Tabs>
       <Show when={error()}><div class="alert" role="alert"><strong>Management request failed</strong><span>{error()} Try refreshing the host after checking the gateway service.</span></div></Show>
       <section class="content" aria-live="polite">
         <Show when={host()} fallback={<div class="loading">{loading() ? "Loading host inventory…" : "Host inventory is unavailable."}</div>}>
@@ -147,7 +141,7 @@ export function App() {
       </section>
     </main>
     <RecentTasks operations={host()?.operations ?? []} />
-    <Show when={confirmDelete() && selectedInstance()}>{instance => <div class="dialog-backdrop" role="presentation"><div class="dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title"><h2 id="delete-title">Delete {instance().name}?</h2><p>This removes the kernel instance definition. This action cannot be undone.</p><div class="dialog-actions"><Button variant="outline" onClick={() => setConfirmDelete(false)}>Cancel</Button><Button ref={element => deleteConfirmButton = element} variant="destructive" data-testid="confirm-delete" disabled={busy()} onClick={async () => { await mutate("DELETE", `/api/1.0/instances/${instance().id}`, { expected_generation: host()?.generation ?? instance().generation }); setConfirmDelete(false); navigate({ kind: "host" }) }}>Delete Instance</Button></div></div></div>}</Show>
+    <Show when={selectedInstance()}>{instance => <AlertDialog open={confirmDelete()} onOpenChange={setConfirmDelete}><AlertDialogPortal><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {instance().name}?</AlertDialogTitle><AlertDialogDescription>This removes the kernel instance definition. This action cannot be undone.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction class="border-destructive bg-destructive text-destructive-foreground hover:bg-destructive/90" data-testid="confirm-delete" disabled={busy()} onClick={async () => { await mutate("DELETE", `/api/1.0/instances/${instance().id}`, { expected_generation: host()?.generation ?? instance().generation }); setConfirmDelete(false); navigate({ kind: "host" }) }}>Delete Instance</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialogPortal></AlertDialog>}</Show>
   </div>
 }
 
@@ -160,7 +154,7 @@ function DefinitionTable(props: { rows: Array<[string, string | number]> }) { re
 function HostView(props: { host?: HostSnapshot; tab: Tab; busy: boolean; mutate: (method: string, path: string, body: unknown) => Promise<void> }) {
   return <Show when={props.host}>{host => <Switch>
     <Match when={props.tab === "summary"}><div class="view-grid"><section><h2>Host Information</h2><DefinitionTable rows={[["Status", titleCase(host().health)], ["Kernel", host().kernel.release], ["Architecture", host().topology.architecture], ["Generation", host().generation], ["Multikernel", host().kernel.multikernel_enabled ? "Enabled" : "Disabled"]]} /></section><section><h2>Capacity</h2><DefinitionTable rows={[["Logical CPUs", host().topology.cpus.length], ["Pool CPUs", host().resource_pool.cpu_hardware_ids.join(", ") || "None"], ["Memory", formatBytes(host().memory.total_bytes)], ["Assigned", formatBytes(host().memory.assigned_bytes)], ["Instances", host().instances.length]]} /></section><section class="span-two"><h2>Virtual Kernels</h2><InstanceTable instances={host().instances} /></section></div></Match>
-    <Match when={props.tab === "monitor"}><div class="view-grid"><section class="span-two"><h2>CPU Topology</h2><div class="cpu-grid"><For each={host().topology.cpus}>{cpu => <div class="cpu-cell"><strong>CPU {cpu.logical_id}</strong><span>Core {cpu.core_id} · NUMA {cpu.numa_node}</span><Badge variant={cpu.online ? "success" : "destructive"}>{cpu.online ? "Online" : "Offline"}</Badge></div>}</For></div></section><section><h2>Memory</h2><DefinitionTable rows={[["Total", formatBytes(host().memory.total_bytes)], ["Host Reserved", formatBytes(host().memory.host_reserved_bytes)], ["Assignable", formatBytes(host().memory.assignable_bytes)], ["Assigned", formatBytes(host().memory.assigned_bytes)]]} /></section><section><h2>NUMA Nodes</h2><DefinitionTable rows={host().topology.numa_nodes.map(node => [`Node ${node.id}`, `${formatBytes(node.available_memory_bytes)} available`])} /></section></div></Match>
+    <Match when={props.tab === "monitor"}><div class="view-grid"><section class="span-two"><h2>CPU Topology</h2><div class="cpu-grid"><For each={host().topology.cpus}>{cpu => <div class="cpu-cell"><strong>CPU {cpu.logical_id}</strong><span>Core {cpu.core_id} · NUMA {cpu.numa_node}</span><Badge variant={cpu.online ? "default" : "destructive"}>{cpu.online ? "Online" : "Offline"}</Badge></div>}</For></div></section><section><h2>Memory</h2><DefinitionTable rows={[["Total", formatBytes(host().memory.total_bytes)], ["Host Reserved", formatBytes(host().memory.host_reserved_bytes)], ["Assignable", formatBytes(host().memory.assignable_bytes)], ["Assigned", formatBytes(host().memory.assigned_bytes)]]} /></section><section><h2>NUMA Nodes</h2><DefinitionTable rows={host().topology.numa_nodes.map(node => [`Node ${node.id}`, `${formatBytes(node.available_memory_bytes)} available`])} /></section></div></Match>
     <Match when={props.tab === "manage"}><HostManage host={host()} busy={props.busy} mutate={props.mutate} /></Match>
   </Switch>}</Show>
 }

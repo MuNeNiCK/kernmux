@@ -1,6 +1,92 @@
 @import "tailwindcss";
+@import "tw-animate-css";
 
-:root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #172033; background: #f6f7f9; font-synthesis: none; }
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+  --color-info: var(--info);
+  --color-info-foreground: var(--info-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-console-header: var(--console-header);
+  --color-console-header-foreground: var(--console-header-foreground);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+:root {
+  --radius: 0.5rem;
+  --background: #fbfbfb;
+  --foreground: #202327;
+  --card: #ffffff;
+  --card-foreground: #202327;
+  --popover: #ffffff;
+  --popover-foreground: #202327;
+  --primary: #006f63;
+  --primary-foreground: #ffffff;
+  --secondary: #f6f7f8;
+  --secondary-foreground: #202327;
+  --muted: #f4f5f6;
+  --muted-foreground: #66707a;
+  --accent: #eef1f2;
+  --accent-foreground: #202327;
+  --destructive: #c93a3a;
+  --destructive-foreground: #ffffff;
+  --success: #2f7d4f;
+  --success-foreground: #ffffff;
+  --warning: #9a6a18;
+  --warning-foreground: #ffffff;
+  --info: #64706b;
+  --info-foreground: #ffffff;
+  --border: #dde2e6;
+  --input: #d3d9de;
+  --ring: #006f63;
+  --sidebar: #ffffff;
+  --sidebar-foreground: #202327;
+  --sidebar-primary: #006f63;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #eef1f2;
+  --sidebar-accent-foreground: #202327;
+  --sidebar-border: #dde2e6;
+  --sidebar-ring: #006f63;
+  --console-header: #25292e;
+  --console-header-foreground: #f7f8f9;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: var(--foreground);
+  background: var(--background);
+  font-synthesis: none;
+}
 * { box-sizing: border-box; }
 html, body, #root { min-height: 100%; margin: 0; }
 body { min-width: 320px; overflow-x: hidden; }
@@ -74,11 +160,6 @@ button:disabled { cursor: not-allowed; }
 .tasks-table { font-size: 11px; }
 .task-row { display: grid; grid-template-columns: 1fr 1fr 160px 90px; gap: 12px; align-items: center; min-height: 30px; padding: 3px 15px; border-bottom: 1px solid #edf0f3; }
 .tasks-empty { display: block; padding: 10px 15px; color: #8992a3; }
-.dialog-backdrop { position: fixed; z-index: 80; inset: 0; display: grid; place-items: center; padding: 20px; background: rgb(15 23 42 / 38%); }
-.dialog { width: min(430px, 100%); padding: 20px; border: 1px solid #b8c0cc; border-radius: 6px; background: #fff; box-shadow: 0 16px 40px rgb(15 23 42 / 24%); overscroll-behavior: contain; }
-.dialog h2 { margin: 0 0 8px; font-size: 18px; }
-.dialog p { margin: 0; color: #5f6b7c; font-size: 14px; line-height: 1.5; }
-.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 @media (max-width: 760px) {
   .app-shell { grid-template: 46px auto minmax(0, 1fr) auto / 1fr; }
   .inventory { grid-row: 2; grid-column: 1; max-height: 210px; border-right: 0; border-bottom: 1px solid #d8dde5; }
