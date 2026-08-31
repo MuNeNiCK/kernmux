@@ -13,7 +13,6 @@
     "jsxImportSource": "solid-js",
     "strict": true,
     "skipLibCheck": true,
-    "noUncheckedIndexedAccess": true,
     "types": ["vite/client", "vitest/globals"]
   },
   "include": ["src", "vite.config.ts"]

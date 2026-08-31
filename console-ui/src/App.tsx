@@ -7,6 +7,7 @@ import { Button } from "./components/ui/button"
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogPortal, AlertDialogTitle } from "./components/ui/alert-dialog"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table"
 import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs"
+import { Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent, SidebarGroupLabel, SidebarInset, SidebarMenu, SidebarMenuBadge, SidebarMenuButton, SidebarMenuItem, SidebarMenuSub, SidebarMenuSubButton, SidebarMenuSubItem, SidebarProvider } from "./components/ui/sidebar"
 
 type ObjectSelection = { kind: "host" } | { kind: "instance"; id: number } | { kind: "images" } | { kind: "operations" }
 type Tab = "summary" | "monitor" | "manage"
@@ -97,52 +98,51 @@ export function App() {
     return current.kind === "host" ? "Host" : current.kind === "images" ? "Images" : "Operations"
   })
 
-  return <div class="app-shell" data-testid="app-shell">
+  return <SidebarProvider class="grid h-svh min-h-0 grid-rows-[56px_minmax(0,1fr)] overflow-hidden bg-background text-foreground md:grid-cols-[236px_minmax(0,1fr)]" style={{ "--sidebar-width": "236px" } as any} data-testid="app-shell">
     <a class="skip-link" href="#main-content">Skip to Main Content</a>
-    <header class="topbar"><div class="brand"><span class="brand-mark">K</span><strong>Kernmux</strong><span>Host Client</span></div><div class="top-status"><Badge variant={host()?.health === "healthy" ? "default" : "outline"}>{host() ? titleCase(host()!.health) : "Connecting"}</Badge><span>Local administration</span></div></header>
-    <aside class="inventory" aria-label="Inventory">
-      <div class="inventory-heading"><strong>Navigator</strong><span>Single host inventory</span></div>
-      <nav>
-        <button class="tree-row root" classList={{ selected: selection().kind === "host" }} data-testid="nav-host" onClick={() => navigate({ kind: "host" })}><Server aria-hidden="true" /><span>Host</span></button>
-        <div class="tree-branch">
-          <button class="tree-row" classList={{ selected: selection().kind === "host" && tab() === "manage" }} onClick={() => navigate({ kind: "host" }, "manage")}><CircleGauge aria-hidden="true" /><span>Manage</span></button>
-          <button class="tree-row" classList={{ selected: selection().kind === "host" && tab() === "monitor" }} onClick={() => navigate({ kind: "host" }, "monitor")}><Activity aria-hidden="true" /><span>Monitor</span></button>
-        </div>
-        <div class="tree-section"><span>Instances</span><Badge>{host()?.instances.length ?? 0}</Badge></div>
-        <div class="tree-branch">
-          <For each={host()?.instances ?? []}>{instance => <button class="tree-row" classList={{ selected: selectedInstance()?.id === instance.id }} data-testid={`nav-instance-${instance.id}`} onClick={() => navigate({ kind: "instance", id: instance.id })}><Box aria-hidden="true" /><span class="truncate">{instance.name}</span><span class={`state-dot ${instance.state}`} aria-label={instance.state} /></button>}</For>
-          <Show when={!host()?.instances.length}><span class="tree-empty">No instances</span></Show>
-        </div>
-        <button class="tree-row root" classList={{ selected: selection().kind === "images" }} onClick={() => navigate({ kind: "images" })}><Image aria-hidden="true" /><span>Images</span><Badge>{images().length}</Badge></button>
-        <button class="tree-row root" classList={{ selected: selection().kind === "operations" }} onClick={() => navigate({ kind: "operations" })}><Layers3 aria-hidden="true" /><span>Operations</span></button>
-      </nav>
-    </aside>
-    <main id="main-content" class="workspace" tabindex="-1">
-      <section class="object-header">
-        <div class="object-icon"><Switch><Match when={selection().kind === "host"}><Server /></Match><Match when={selection().kind === "instance"}><Box /></Match><Match when={selection().kind === "images"}><HardDrive /></Match><Match when={selection().kind === "operations"}><Activity /></Match></Switch></div>
-        <div class="object-heading"><p>{selection().kind === "instance" ? "Virtual Kernel" : "Kernmux"}</p><h1>{objectTitle()}</h1></div>
-        <div class="toolbar"><Button variant="outline" onClick={() => void refresh()} disabled={busy()}><RefreshCw aria-hidden="true" />Refresh</Button><InstanceToolbar instance={selectedInstance()} busy={busy()} mutate={mutate} /></div>
-      </section>
-      <Tabs value={tab()} onChange={value => navigate(selection(), value as Tab)}>
-        <TabsList aria-label="Object views">
-          <For each={["summary", "monitor", "manage"] as Tab[]}>{name => <TabsTrigger value={name} data-testid={`tab-${name}`}>{titleCase(name)}</TabsTrigger>}</For>
-        </TabsList>
-      </Tabs>
-      <Show when={error()}><div class="alert" role="alert"><strong>Management request failed</strong><span>{error()} Try refreshing the host after checking the gateway service.</span></div></Show>
-      <section class="content" aria-live="polite">
-        <Show when={host()} fallback={<div class="loading">{loading() ? "Loading host inventory…" : "Host inventory is unavailable."}</div>}>
-          <Switch>
+    <header class="col-span-full flex min-w-0 items-center gap-4 border-b border-console-header-foreground/15 bg-console-header px-5 text-console-header-foreground">
+      <div class="flex min-w-0 items-center gap-2.5 font-semibold"><span class="grid size-7 shrink-0 place-items-center rounded border border-current text-[11px] font-extrabold">K</span><span class="truncate">Kernmux</span><span class="hidden text-xs font-normal text-console-header-foreground/70 sm:inline">Host Client</span></div>
+      <div class="ml-auto flex items-center gap-3"><Badge variant={host()?.health === "healthy" ? "default" : "outline"}>{host() ? titleCase(host()!.health) : "Connecting"}</Badge><span class="hidden text-xs text-console-header-foreground/70 lg:inline">Local administration</span></div>
+    </header>
+    <Sidebar collapsible="none" class="max-md:hidden min-h-0 border-r md:flex" aria-label="Inventory">
+      <SidebarContent class="px-3 py-4"><nav>
+        <SidebarGroup class="p-0"><SidebarGroupLabel class="px-2 text-[11px] font-bold tracking-[0.04em] uppercase">Infrastructure</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>
+          <SidebarMenuItem><SidebarMenuButton isActive={selection().kind === "host"} data-testid="nav-host" onClick={() => navigate({ kind: "host" })}><Server /><span>Host</span></SidebarMenuButton><SidebarMenuSub>
+            <SidebarMenuSubItem><SidebarMenuSubButton isActive={selection().kind === "host" && tab() === "manage"} onClick={() => navigate({ kind: "host" }, "manage")}><CircleGauge /><span>Manage</span></SidebarMenuSubButton></SidebarMenuSubItem>
+            <SidebarMenuSubItem><SidebarMenuSubButton isActive={selection().kind === "host" && tab() === "monitor"} onClick={() => navigate({ kind: "host" }, "monitor")}><Activity /><span>Monitor</span></SidebarMenuSubButton></SidebarMenuSubItem>
+          </SidebarMenuSub></SidebarMenuItem>
+        </SidebarMenu></SidebarGroupContent></SidebarGroup>
+        <SidebarGroup class="mt-5 p-0"><SidebarGroupLabel class="px-2 text-[11px] font-bold tracking-[0.04em] uppercase">Virtual Kernels</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>
+          <For each={host()?.instances ?? []}>{instance => <SidebarMenuItem><SidebarMenuButton isActive={selectedInstance()?.id === instance.id} data-testid={`nav-instance-${instance.id}`} onClick={() => navigate({ kind: "instance", id: instance.id })}><Box /><span>{instance.name}</span><SidebarMenuBadge><span class={`state-dot ${instance.state}`} aria-label={instance.state} /></SidebarMenuBadge></SidebarMenuButton></SidebarMenuItem>}</For>
+          <Show when={!host()?.instances.length}><li class="px-2 py-2 text-xs text-muted-foreground">No virtual kernels</li></Show>
+        </SidebarMenu></SidebarGroupContent></SidebarGroup>
+        <SidebarGroup class="mt-5 p-0"><SidebarGroupLabel class="px-2 text-[11px] font-bold tracking-[0.04em] uppercase">Resources</SidebarGroupLabel><SidebarGroupContent><SidebarMenu>
+          <SidebarMenuItem><SidebarMenuButton isActive={selection().kind === "images"} onClick={() => navigate({ kind: "images" })}><Image /><span>Images</span><SidebarMenuBadge>{images().length}</SidebarMenuBadge></SidebarMenuButton></SidebarMenuItem>
+          <SidebarMenuItem><SidebarMenuButton isActive={selection().kind === "operations"} onClick={() => navigate({ kind: "operations" })}><Layers3 /><span>Operations</span></SidebarMenuButton></SidebarMenuItem>
+        </SidebarMenu></SidebarGroupContent></SidebarGroup>
+      </nav></SidebarContent>
+    </Sidebar>
+    <SidebarInset class="min-h-0 min-w-0 overflow-hidden md:col-start-2 md:row-start-2">
+      <main id="main-content" class="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden outline-none" tabindex="-1">
+        <header class="flex min-w-0 flex-col gap-4 border-b px-4 py-4 sm:flex-row sm:items-start sm:justify-between md:px-8 md:py-5">
+          <div class="object-heading min-w-0"><div class="flex min-h-8 items-center gap-3 text-xs text-muted-foreground"><span class="grid size-8 shrink-0 place-items-center rounded-md border bg-card text-foreground"><Switch><Match when={selection().kind === "host"}><Server /></Match><Match when={selection().kind === "instance"}><Box /></Match><Match when={selection().kind === "images"}><HardDrive /></Match><Match when={selection().kind === "operations"}><Activity /></Match></Switch></span>{selection().kind === "instance" ? "Virtual Kernels" : "Kernmux"}</div><h1 class="mt-1 truncate text-[28px] font-[750] tracking-tight">{objectTitle()}</h1></div>
+          <div class="flex shrink-0 flex-wrap items-center gap-2.5"><Button variant="outline" size="sm" onClick={() => void refresh()} disabled={busy()}><RefreshCw aria-hidden="true" />Refresh</Button><InstanceToolbar instance={selectedInstance()} busy={busy()} mutate={mutate} /></div>
+        </header>
+        <Tabs value={tab()} onChange={value => navigate(selection(), value as Tab)} class="border-b px-4 md:px-8"><TabsList aria-label="Object views" class="h-11 bg-transparent p-0"><For each={["summary", "monitor", "manage"] as Tab[]}>{name => <TabsTrigger value={name} data-testid={`tab-${name}`} class="h-11 rounded-none border-x-0 border-t-0 data-[selected]:border-b-2 data-[selected]:shadow-none">{titleCase(name)}</TabsTrigger>}</For></TabsList></Tabs>
+        <section class="content min-h-0 overflow-auto px-4 py-5 md:px-8" aria-live="polite">
+          <Show when={error()}><div class="mb-5 flex flex-col gap-1 rounded-md border border-destructive/35 bg-destructive/5 px-4 py-3 text-sm text-destructive" role="alert"><strong>Management request failed</strong><span>{error()} Try refreshing the host after checking the gateway service.</span></div></Show>
+          <Show when={host()} fallback={<div class="grid min-h-48 place-items-center text-sm text-muted-foreground">{loading() ? "Loading host inventory…" : "Host inventory is unavailable."}</div>}><Switch>
             <Match when={selection().kind === "host"}><HostView host={host()} tab={tab()} busy={busy()} mutate={mutate} /></Match>
             <Match when={selection().kind === "instance"}><InstanceView instance={selectedInstance()} images={images()} tab={tab()} busy={busy()} mutate={mutate} onDelete={() => setConfirmDelete(true)} /></Match>
             <Match when={selection().kind === "images"}><ImagesView images={images()} generation={host()?.generation ?? 0} tab={tab()} busy={busy()} mutate={mutate} /></Match>
             <Match when={selection().kind === "operations"}><OperationsView operations={host()?.operations ?? []} /></Match>
-          </Switch>
-        </Show>
-      </section>
-    </main>
-    <RecentTasks operations={host()?.operations ?? []} />
+          </Switch></Show>
+        </section>
+        <RecentTasks operations={host()?.operations ?? []} />
+      </main>
+    </SidebarInset>
     <Show when={selectedInstance()}>{instance => <AlertDialog open={confirmDelete()} onOpenChange={setConfirmDelete}><AlertDialogPortal><AlertDialogContent><AlertDialogHeader><AlertDialogTitle>Delete {instance().name}?</AlertDialogTitle><AlertDialogDescription>This removes the kernel instance definition. This action cannot be undone.</AlertDialogDescription></AlertDialogHeader><AlertDialogFooter><AlertDialogCancel>Cancel</AlertDialogCancel><AlertDialogAction class="border-destructive bg-destructive text-destructive-foreground hover:bg-destructive/90" data-testid="confirm-delete" disabled={busy()} onClick={async () => { await mutate("DELETE", `/api/1.0/instances/${instance().id}`, { expected_generation: host()?.generation ?? instance().generation }); setConfirmDelete(false); navigate({ kind: "host" }) }}>Delete Instance</AlertDialogAction></AlertDialogFooter></AlertDialogContent></AlertDialogPortal></AlertDialog>}</Show>
-  </div>
+  </SidebarProvider>
 }
 
 function InstanceToolbar(props: { instance?: Instance; busy: boolean; mutate: (method: string, path: string, body: unknown) => Promise<void> }) {
@@ -188,7 +188,7 @@ function ImagesView(props: { images: ImageArtifact[]; generation: number; tab: T
 
 function OperationsView(props: { operations: Operation[] }) { return <section><h2>Host Operations</h2><div class="panel"><Table><TableHeader><TableRow><TableHead>Task</TableHead><TableHead>State</TableHead><TableHead>Progress</TableHead><TableHead>Started</TableHead><TableHead>Completed</TableHead></TableRow></TableHeader><TableBody><For each={props.operations}>{operation => <TableRow><TableCell>{titleCase(operation.kind)}</TableCell><TableCell><Badge variant={badgeVariant(operation.state) as any}>{titleCase(operation.state)}</Badge></TableCell><TableCell>{operation.progress_percent === undefined ? "—" : `${operation.progress_percent}%`}</TableCell><TableCell>{formatDate(operation.created_at)}</TableCell><TableCell>{operation.completed_at ? formatDate(operation.completed_at) : "—"}</TableCell></TableRow>}</For><Show when={!props.operations.length}><TableRow><TableCell colSpan={5} class="empty-cell">No host operations have been recorded.</TableCell></TableRow></Show></TableBody></Table></div></section> }
 
-function RecentTasks(props: { operations: Operation[] }) { const recent = () => props.operations.slice(-4).reverse(); return <footer class="tasks"><div class="tasks-title"><strong>Recent Tasks</strong><span>{props.operations.length} tasks</span></div><div class="tasks-table"><Show when={recent().length} fallback={<span class="tasks-empty">No recent host tasks</span>}><For each={recent()}>{operation => <div class="task-row"><span>{titleCase(operation.kind)}</span><span>{operation.id}</span><span>{formatDate(operation.created_at)}</span><Badge variant={badgeVariant(operation.state) as any}>{titleCase(operation.state)}</Badge></div>}</For></Show></div></footer> }
+function RecentTasks(props: { operations: Operation[] }) { const recent = () => props.operations.slice(-4).reverse(); return <footer class="max-h-32 overflow-auto border-t bg-card text-xs"><div class="flex h-9 items-center justify-between border-b px-4"><strong>Recent Tasks</strong><span class="text-muted-foreground">{props.operations.length} tasks</span></div><Show when={recent().length} fallback={<span class="block px-4 py-3 text-muted-foreground">No recent host tasks</span>}><For each={recent()}>{operation => <div class="grid min-h-8 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_160px_90px] items-center gap-3 border-b px-4 py-1"><span>{titleCase(operation.kind)}</span><span class="truncate">{operation.id}</span><span>{formatDate(operation.created_at)}</span><Badge variant={badgeVariant(operation.state) as any}>{titleCase(operation.state)}</Badge></div>}</For></Show></footer> }
 
 function Field(props: { label: string; name: string; ref: (element: HTMLInputElement) => void; type?: string; defaultValue?: string; placeholder?: string; required?: boolean }) { return <label>{props.label}<input ref={element => { props.ref(element); if (props.defaultValue !== undefined) element.value = props.defaultValue }} name={props.name} type={props.type ?? "text"} placeholder={props.placeholder} autocomplete="off" required={props.required ?? true} /></label> }
 function formatDate(value: string) { const date = new Date(value); return Number.isNaN(date.valueOf()) ? value : dateTime.format(date) }
