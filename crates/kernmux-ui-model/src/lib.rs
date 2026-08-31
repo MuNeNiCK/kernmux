@@ -5,6 +5,69 @@ use kernmux_api::v1::{
     OperationState,
 };
 
+/// Parses a compact hardware CPU list such as `4-7,10,12`.
+///
+/// # Errors
+/// Returns a presentation-safe reason for malformed, reversed, or duplicate entries.
+pub fn parse_cpu_hardware_ids(value: &str) -> Result<Vec<u32>, &'static str> {
+    let mut ids = Vec::new();
+    for part in value
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if let Some((start, end)) = part.split_once('-') {
+            let start = start.parse::<u32>().map_err(|_| "CPU list is invalid")?;
+            let end = end.parse::<u32>().map_err(|_| "CPU list is invalid")?;
+            if start > end {
+                return Err("CPU range must be ascending");
+            }
+            ids.extend(start..=end);
+        } else {
+            ids.push(part.parse::<u32>().map_err(|_| "CPU list is invalid")?);
+        }
+    }
+    if ids.is_empty() {
+        return Err("at least one CPU is required");
+    }
+    ids.sort_unstable();
+    if ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err("CPU list contains duplicates");
+    }
+    Ok(ids)
+}
+
+/// Parses bytes or a binary unit (`KiB`, `MiB`, `GiB`, `TiB`).
+///
+/// # Errors
+/// Returns a presentation-safe reason for malformed, zero, or overflowing values.
+pub fn parse_memory_bytes(value: &str) -> Result<u64, &'static str> {
+    let value = value.trim();
+    let (number, multiplier) = [
+        ("TiB", 1_u64 << 40),
+        ("GiB", 1_u64 << 30),
+        ("MiB", 1_u64 << 20),
+        ("KiB", 1_u64 << 10),
+        ("B", 1),
+    ]
+    .into_iter()
+    .find_map(|(suffix, multiplier)| {
+        value
+            .strip_suffix(suffix)
+            .map(|number| (number.trim(), multiplier))
+    })
+    .unwrap_or((value, 1));
+    let number = number
+        .parse::<u64>()
+        .map_err(|_| "memory size is invalid")?;
+    let bytes = number
+        .checked_mul(multiplier)
+        .ok_or("memory size is too large")?;
+    (bytes > 0)
+        .then_some(bytes)
+        .ok_or("memory size must be greater than zero")
+}
+
 /// Top-level host-management section.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Section {
@@ -232,6 +295,7 @@ impl ManagementModel {
             .is_some_and(|snapshot| snapshot.host.instances.iter().any(|item| item.id == id))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn validate(&self, intent: &Intent) -> Result<(), &'static str> {
         let snapshot = self.snapshot().ok_or("host data is not ready")?;
         match intent {
@@ -511,5 +575,24 @@ mod tests {
 
         assert!(matches!(model.data(), DataState::Ready(_)));
         model.request(intent).unwrap();
+    }
+
+    #[test]
+    fn setup_values_are_parsed_strictly() {
+        assert_eq!(parse_cpu_hardware_ids("4-6, 9"), Ok(vec![4, 5, 6, 9]));
+        assert_eq!(
+            parse_cpu_hardware_ids("4,4"),
+            Err("CPU list contains duplicates")
+        );
+        assert_eq!(
+            parse_cpu_hardware_ids("7-4"),
+            Err("CPU range must be ascending")
+        );
+        assert_eq!(parse_memory_bytes("2 GiB"), Ok(2_u64 << 30));
+        assert_eq!(parse_memory_bytes("512MiB"), Ok(512_u64 << 20));
+        assert_eq!(
+            parse_memory_bytes("0"),
+            Err("memory size must be greater than zero")
+        );
     }
 }

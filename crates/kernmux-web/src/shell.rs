@@ -1,7 +1,7 @@
 use std::{future::Future, pin::Pin, rc::Rc};
 
 use gpui::{
-    App, Bounds, Context, IntoElement, Render, Window, WindowBounds, WindowOptions, div,
+    App, Bounds, Context, Entity, IntoElement, Render, Window, WindowBounds, WindowOptions, div,
     prelude::*, px, size,
 };
 use gpui_component::{
@@ -9,6 +9,7 @@ use gpui_component::{
     alert::Alert,
     button::{Button, ButtonVariants},
     h_flex,
+    input::{Input, InputState},
     progress::Progress,
     scroll::ScrollableElement,
     sidebar::{Sidebar, SidebarHeader, SidebarMenu, SidebarMenuItem},
@@ -17,9 +18,13 @@ use gpui_component::{
     v_flex,
 };
 use kernmux_api::v1::{
-    Generation, ImageArtifact, Instance, InstanceState, Operation, OperationState, SnapshotHealth,
+    Generation, ImageArtifact, ImageKind, Instance, InstanceId, InstanceState, Operation,
+    OperationState, SnapshotHealth,
 };
-use kernmux_ui_model::{DataState, Intent, ManagementModel, ManagementSnapshot, Section};
+use kernmux_ui_model::{
+    DataState, Intent, ManagementModel, ManagementSnapshot, Section, parse_cpu_hardware_ids,
+    parse_memory_bytes,
+};
 
 pub type ManagementFuture =
     Pin<Box<dyn Future<Output = Result<ManagementSnapshot, String>> + 'static>>;
@@ -29,13 +34,38 @@ pub trait ManagementBackend {
     fn execute(&self, intent: Intent) -> ManagementFuture;
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SetupPanel {
+    ResourcePool,
+    Instance,
+    Image,
+    LoadImage(InstanceId),
+}
+
 struct ManagementShell {
     model: ManagementModel,
     backend: Rc<dyn ManagementBackend>,
     action_error: Option<String>,
+    setup: Option<SetupPanel>,
+    pool_cpus: Entity<InputState>,
+    pool_memory: Entity<InputState>,
+    instance_id: Entity<InputState>,
+    instance_name: Entity<InputState>,
+    instance_cpus: Entity<InputState>,
+    instance_memory: Entity<InputState>,
+    image_kind: ImageKind,
+    image_path: Entity<InputState>,
+    image_expected_id: Entity<InputState>,
+    load_kernel_id: Entity<InputState>,
+    load_initrd_id: Entity<InputState>,
+    load_command_line: Entity<InputState>,
 }
 
-#[allow(clippy::redundant_closure_for_method_calls, clippy::unused_self)]
+#[allow(
+    clippy::redundant_closure_for_method_calls,
+    clippy::too_many_lines,
+    clippy::unused_self
+)]
 impl ManagementShell {
     fn new(
         backend: Rc<dyn ManagementBackend>,
@@ -46,6 +76,39 @@ impl ManagementShell {
             model: ManagementModel::loading(),
             backend,
             action_error: None,
+            setup: None,
+            pool_cpus: cx
+                .new(|cx| InputState::new(window, cx).placeholder("Hardware IDs, for example 4-7")),
+            pool_memory: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("For example 8 GiB")
+                    .default_value("8 GiB")
+            }),
+            instance_id: cx.new(|cx| InputState::new(window, cx).placeholder("Numeric ID")),
+            instance_name: cx.new(|cx| InputState::new(window, cx).placeholder("build-node")),
+            instance_cpus: cx
+                .new(|cx| InputState::new(window, cx).placeholder("Pool CPU IDs, for example 4-5")),
+            instance_memory: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("For example 2 GiB")
+                    .default_value("2 GiB")
+            }),
+            image_kind: ImageKind::Kernel,
+            image_path: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("/var/lib/kernmux/import/vmlinuz")
+            }),
+            image_expected_id: cx
+                .new(|cx| InputState::new(window, cx).placeholder("Optional sha256: digest")),
+            load_kernel_id: cx
+                .new(|cx| InputState::new(window, cx).placeholder("sha256: kernel artifact ID")),
+            load_initrd_id: cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Optional sha256: initrd artifact ID")
+            }),
+            load_command_line: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Kernel command line")
+                    .default_value("console=mktty0")
+            }),
         };
         shell.refresh(window, cx);
         shell
@@ -76,13 +139,25 @@ impl ManagementShell {
         }
         self.action_error = None;
         let future = self.backend.execute(intent);
+        let backend = Rc::clone(&self.backend);
         cx.spawn_in(window, async move |this, cx| {
             let result = future.await;
+            let refreshed = if result.is_err() {
+                Some(backend.load_snapshot().await)
+            } else {
+                None
+            };
             let _ = this.update_in(cx, |this, _, cx| {
                 match result {
-                    Ok(snapshot) => this.model.replace_snapshot(snapshot),
+                    Ok(snapshot) => {
+                        this.model.replace_snapshot(snapshot);
+                        this.setup = None;
+                    }
                     Err(message) => {
                         this.model.reject_pending();
+                        if let Some(Ok(snapshot)) = refreshed {
+                            this.model.replace_snapshot(snapshot);
+                        }
                         this.action_error = Some(message);
                     }
                 }
@@ -251,6 +326,7 @@ impl ManagementShell {
             .children(self.action_error.as_ref().map(|message| {
                 Alert::error("action-error", message.clone()).title("Host action failed")
             }))
+            .children(self.setup.map(|setup| self.setup_panel(setup, cx)))
             .child(body)
             .when(window.bounds().size.width < px(1000.), |this| this.p_4())
     }
@@ -286,6 +362,259 @@ impl ManagementShell {
                     .label("Retry connection")
                     .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
             )
+    }
+
+    fn setup_panel(&self, setup: SetupPanel, cx: &mut Context<Self>) -> gpui::Div {
+        let (title, detail, fields, submit_label) = match setup {
+            SetupPanel::ResourcePool => (
+                "Configure resource pool",
+                "Delegate CPUs and memory from the control kernel to managed peer kernels.",
+                v_flex()
+                    .gap_4()
+                    .child(input_field(
+                        "CPU hardware IDs",
+                        "Comma-separated IDs and ranges from the host topology.",
+                        Input::new(&self.pool_cpus),
+                        cx,
+                    ))
+                    .child(input_field(
+                        "Memory",
+                        "Binary units are accepted: MiB, GiB, or TiB.",
+                        Input::new(&self.pool_memory),
+                        cx,
+                    ))
+                    .into_any_element(),
+                "Apply pool",
+            ),
+            SetupPanel::Instance => (
+                "Create kernel instance",
+                "Reserve an identity and a subset of resources from the delegated pool.",
+                div()
+                    .grid()
+                    .grid_cols(2)
+                    .gap_4()
+                    .child(input_field(
+                        "Instance ID",
+                        "Stable numeric identifier.",
+                        Input::new(&self.instance_id),
+                        cx,
+                    ))
+                    .child(input_field(
+                        "Name",
+                        "Human-readable inventory name.",
+                        Input::new(&self.instance_name),
+                        cx,
+                    ))
+                    .child(input_field(
+                        "CPU hardware IDs",
+                        "Must be free in the resource pool.",
+                        Input::new(&self.instance_cpus),
+                        cx,
+                    ))
+                    .child(input_field(
+                        "Memory",
+                        "Must fit in unassigned pool memory.",
+                        Input::new(&self.instance_memory),
+                        cx,
+                    ))
+                    .into_any_element(),
+                "Create instance",
+            ),
+            SetupPanel::Image => {
+                let kernel = if self.image_kind == ImageKind::Kernel {
+                    Button::new("kind-kernel").primary()
+                } else {
+                    Button::new("kind-kernel").outline()
+                };
+                let initrd = if self.image_kind == ImageKind::Initrd {
+                    Button::new("kind-initrd").primary()
+                } else {
+                    Button::new("kind-initrd").outline()
+                };
+                (
+                    "Register host artifact",
+                    "Import a kernel or initrd from an administrator-controlled host path.",
+                    v_flex()
+                        .gap_4()
+                        .child(
+                            v_flex()
+                                .gap_2()
+                                .child(div().text_sm().font_medium().child("Artifact type"))
+                                .child(
+                                    h_flex()
+                                        .gap_2()
+                                        .child(kernel.label("Kernel").on_click(cx.listener(
+                                            |this, _, _, cx| {
+                                                this.image_kind = ImageKind::Kernel;
+                                                cx.notify();
+                                            },
+                                        )))
+                                        .child(initrd.label("Initrd").on_click(cx.listener(
+                                            |this, _, _, cx| {
+                                                this.image_kind = ImageKind::Initrd;
+                                                cx.notify();
+                                            },
+                                        ))),
+                                ),
+                        )
+                        .child(input_field(
+                            "Host path",
+                            "The daemon only accepts paths beneath configured import roots.",
+                            Input::new(&self.image_path),
+                            cx,
+                        ))
+                        .child(input_field(
+                            "Expected digest",
+                            "Optional sha256 ID used to reject unexpected content.",
+                            Input::new(&self.image_expected_id),
+                            cx,
+                        ))
+                        .into_any_element(),
+                    "Register artifact",
+                )
+            }
+            SetupPanel::LoadImage(id) => (
+                "Load instance image",
+                "Attach verified artifacts to the ready instance before starting it.",
+                v_flex()
+                    .gap_4()
+                    .child(input_field(
+                        "Kernel artifact ID",
+                        "Required content-addressed kernel image.",
+                        Input::new(&self.load_kernel_id),
+                        cx,
+                    ))
+                    .child(input_field(
+                        "Initrd artifact ID",
+                        "Optional content-addressed initrd image.",
+                        Input::new(&self.load_initrd_id),
+                        cx,
+                    ))
+                    .child(input_field(
+                        "Command line",
+                        "Optional boot arguments passed to the peer kernel.",
+                        Input::new(&self.load_command_line),
+                        cx,
+                    ))
+                    .child(
+                        Tag::secondary()
+                            .outline()
+                            .child(format!("Target instance {}", id.0)),
+                    )
+                    .into_any_element(),
+                "Load image",
+            ),
+        };
+
+        card(cx)
+            .border_color(cx.theme().primary)
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(card_heading(title, detail, cx))
+                    .child(Button::new("close-setup").ghost().label("Close").on_click(
+                        cx.listener(|this, _, _, cx| {
+                            this.setup = None;
+                            this.action_error = None;
+                            cx.notify();
+                        }),
+                    )),
+            )
+            .child(fields)
+            .child(
+                h_flex().justify_end().child(
+                    Button::new("submit-setup")
+                        .primary()
+                        .label(submit_label)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.submit_setup(setup, window, cx);
+                        })),
+                ),
+            )
+    }
+
+    fn submit_setup(&mut self, setup: SetupPanel, window: &mut Window, cx: &mut Context<Self>) {
+        let generation = match self.model.data() {
+            DataState::Ready(snapshot) => snapshot.host.generation,
+            DataState::Loading | DataState::Failed(_) => {
+                self.action_error = Some("Host data is not ready.".into());
+                cx.notify();
+                return;
+            }
+        };
+        let intent = match self.setup_intent(setup, generation, cx) {
+            Ok(intent) => intent,
+            Err(message) => {
+                self.action_error = Some(message);
+                cx.notify();
+                return;
+            }
+        };
+        self.dispatch(intent, window, cx);
+    }
+
+    fn setup_intent(
+        &self,
+        setup: SetupPanel,
+        generation: Generation,
+        cx: &App,
+    ) -> Result<Intent, String> {
+        let value = |input: &Entity<InputState>| input.read(cx).value().trim().to_owned();
+        match setup {
+            SetupPanel::ResourcePool => Ok(Intent::ConfigurePool {
+                expected_generation: generation,
+                cpu_hardware_ids: parse_cpu_hardware_ids(&value(&self.pool_cpus))
+                    .map_err(str::to_owned)?,
+                memory_bytes: parse_memory_bytes(&value(&self.pool_memory))
+                    .map_err(str::to_owned)?,
+            }),
+            SetupPanel::Instance => {
+                let id = value(&self.instance_id)
+                    .parse::<u32>()
+                    .map_err(|_| "Instance ID must be a non-negative integer.".to_owned())?;
+                let name = value(&self.instance_name);
+                if name.is_empty() {
+                    return Err("Instance name is required.".into());
+                }
+                Ok(Intent::CreateInstance {
+                    expected_generation: generation,
+                    id: InstanceId(id),
+                    name,
+                    cpu_hardware_ids: parse_cpu_hardware_ids(&value(&self.instance_cpus))
+                        .map_err(str::to_owned)?,
+                    memory_bytes: parse_memory_bytes(&value(&self.instance_memory))
+                        .map_err(str::to_owned)?,
+                })
+            }
+            SetupPanel::Image => {
+                let source_path = value(&self.image_path);
+                if source_path.is_empty() {
+                    return Err("Host path is required.".into());
+                }
+                let expected_id = value(&self.image_expected_id);
+                Ok(Intent::ImportImage {
+                    expected_generation: generation,
+                    kind: self.image_kind,
+                    source_path,
+                    expected_id: (!expected_id.is_empty()).then_some(expected_id),
+                })
+            }
+            SetupPanel::LoadImage(id) => {
+                let kernel_id = value(&self.load_kernel_id);
+                if kernel_id.is_empty() {
+                    return Err("Kernel artifact ID is required.".into());
+                }
+                let initrd_id = value(&self.load_initrd_id);
+                let command_line = value(&self.load_command_line);
+                Ok(Intent::LoadInstanceImage {
+                    id,
+                    expected_generation: generation,
+                    kernel_id,
+                    initrd_id: (!initrd_id.is_empty()).then_some(initrd_id),
+                    command_line: (!command_line.is_empty()).then_some(command_line),
+                })
+            }
+        }
     }
 
     fn overview(&self, snapshot: &ManagementSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
@@ -350,6 +679,36 @@ impl ManagementShell {
         v_flex()
             .w_full()
             .gap_5()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} CPUs delegated · {} pool memory",
+                                host.resource_pool.cpu_hardware_ids.len(),
+                                bytes(
+                                    host.resource_pool
+                                        .memory_regions
+                                        .iter()
+                                        .map(|region| region.bytes)
+                                        .sum()
+                                )
+                            )),
+                    )
+                    .child(
+                        Button::new("configure-pool")
+                            .primary()
+                            .label("Configure pool")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.setup = Some(SetupPanel::ResourcePool);
+                                this.action_error = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
             .child(memory_card(snapshot, cx))
             .child(
                 card(cx)
@@ -358,51 +717,101 @@ impl ManagementShell {
                         "Hardware IDs delegated to the Multikernel pool",
                         cx,
                     ))
-                    .child(div().flex().flex_wrap().gap_2().children(
-                        host.topology.cpus.iter().map(|cpu| {
-                            let delegated = host
-                                .resource_pool
-                                .cpu_hardware_ids
-                                .contains(&cpu.hardware_id);
-                            let available = host
-                                .resource_pool
-                                .available_cpu_hardware_ids
-                                .contains(&cpu.hardware_id);
-                            v_flex()
-                                .w(px(82.))
-                                .gap_1()
-                                .p_2()
-                                .rounded(cx.theme().radius)
-                                .border_1()
-                                .border_color(if delegated {
-                                    cx.theme().primary
-                                } else {
-                                    cx.theme().border
-                                })
-                                .bg(if delegated {
-                                    cx.theme().primary.opacity(0.08)
-                                } else {
-                                    cx.theme().background
-                                })
-                                .child(div().font_medium().child(format!("CPU {}", cpu.logical_id)))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(format!(
-                                            "Core {} · T{}",
-                                            cpu.core_id, cpu.thread_index
-                                        )),
-                                )
-                                .child(if available {
-                                    Tag::success().small().outline().child("Free")
-                                } else if delegated {
-                                    Tag::info().small().outline().child("Assigned")
-                                } else {
-                                    Tag::secondary().small().outline().child("Host")
-                                })
-                        }),
-                    )),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .gap_2()
+                            .children(host.topology.cpus.iter().map(|cpu| {
+                                let delegated = host
+                                    .resource_pool
+                                    .cpu_hardware_ids
+                                    .contains(&cpu.hardware_id);
+                                let available = host
+                                    .resource_pool
+                                    .available_cpu_hardware_ids
+                                    .contains(&cpu.hardware_id);
+                                v_flex()
+                                    .w(px(82.))
+                                    .gap_1()
+                                    .p_2()
+                                    .rounded(cx.theme().radius)
+                                    .border_1()
+                                    .border_color(if delegated {
+                                        cx.theme().primary
+                                    } else {
+                                        cx.theme().border
+                                    })
+                                    .bg(if delegated {
+                                        cx.theme().primary.opacity(0.08)
+                                    } else {
+                                        cx.theme().background
+                                    })
+                                    .child(
+                                        div()
+                                            .font_medium()
+                                            .child(format!("CPU {}", cpu.logical_id)),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(format!(
+                                                "Core {} · T{}",
+                                                cpu.core_id, cpu.thread_index
+                                            )),
+                                    )
+                                    .child(if available {
+                                        Tag::success().small().outline().child("Free")
+                                    } else if delegated {
+                                        Tag::info().small().outline().child("Assigned")
+                                    } else {
+                                        Tag::secondary().small().outline().child("Host")
+                                    })
+                            }))
+                            .children(
+                                host.resource_pool
+                                    .cpu_hardware_ids
+                                    .iter()
+                                    .filter(|hardware_id| {
+                                        !host
+                                            .topology
+                                            .cpus
+                                            .iter()
+                                            .any(|cpu| cpu.hardware_id == **hardware_id)
+                                    })
+                                    .map(|hardware_id| {
+                                        let available = host
+                                            .resource_pool
+                                            .available_cpu_hardware_ids
+                                            .contains(hardware_id);
+                                        v_flex()
+                                            .w(px(82.))
+                                            .gap_1()
+                                            .p_2()
+                                            .rounded(cx.theme().radius)
+                                            .border_1()
+                                            .border_color(cx.theme().primary)
+                                            .bg(cx.theme().primary.opacity(0.08))
+                                            .child(
+                                                div()
+                                                    .font_medium()
+                                                    .child(format!("APIC {hardware_id}")),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child("Delegated ID"),
+                                            )
+                                            .child(if available {
+                                                Tag::success().small().outline().child("Free")
+                                            } else {
+                                                Tag::info().small().outline().child("Assigned")
+                                            })
+                                    }),
+                            ),
+                    ),
             )
             .child(
                 card(cx)
@@ -463,9 +872,8 @@ impl ManagementShell {
                             .icon(IconName::Plus)
                             .label("New instance")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.action_error = Some(
-                                    "Open the host setup workflow to create an instance.".into(),
-                                );
+                                this.setup = Some(SetupPanel::Instance);
+                                this.action_error = None;
                                 cx.notify();
                             })),
                     ),
@@ -563,15 +971,42 @@ impl ManagementShell {
                             ),
                     ),
             )
-            .children(action.map(|(label, icon, intent)| {
-                Button::new(("instance-action", instance.id.0 as usize))
-                    .outline()
-                    .icon(icon)
-                    .label(label)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.dispatch(intent.clone(), window, cx);
+            .child(
+                h_flex()
+                    .gap_2()
+                    .children((instance.state == InstanceState::Ready).then(|| {
+                        let id = instance.id;
+                        Button::new(("load-instance", id.0 as usize))
+                            .primary()
+                            .label("Load image")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.setup = Some(SetupPanel::LoadImage(id));
+                                this.action_error = None;
+                                cx.notify();
+                            }))
                     }))
-            }))
+                    .children((instance.state == InstanceState::Loaded).then(|| {
+                        let intent = Intent::UnloadInstance {
+                            id: instance.id,
+                            expected_generation: generation,
+                        };
+                        Button::new(("unload-instance", instance.id.0 as usize))
+                            .outline()
+                            .label("Unload")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.dispatch(intent.clone(), window, cx);
+                            }))
+                    }))
+                    .children(action.map(|(label, icon, intent)| {
+                        Button::new(("instance-action", instance.id.0 as usize))
+                            .outline()
+                            .icon(icon)
+                            .label(label)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.dispatch(intent.clone(), window, cx);
+                            }))
+                    })),
+            )
     }
 
     fn images(&self, snapshot: &ManagementSnapshot, cx: &mut Context<Self>) -> impl IntoElement {
@@ -591,11 +1026,10 @@ impl ManagementShell {
                     .child(
                         Button::new("import-image")
                             .primary()
-                            .label("Import image")
+                            .label("Register host artifact")
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.action_error = Some(
-                                    "Open the host setup workflow to register an image.".into(),
-                                );
+                                this.setup = Some(SetupPanel::Image);
+                                this.action_error = None;
                                 cx.notify();
                             })),
                     ),
@@ -784,6 +1218,19 @@ fn card_heading(title: &str, detail: &str, cx: &App) -> impl IntoElement {
         .child(
             div()
                 .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(detail.to_owned()),
+        )
+}
+
+fn input_field(label: &str, detail: &str, input: Input, cx: &App) -> impl IntoElement {
+    v_flex()
+        .gap_2()
+        .child(div().text_sm().font_medium().child(label.to_owned()))
+        .child(input.aria_label(label.to_owned()))
+        .child(
+            div()
+                .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child(detail.to_owned()),
         )

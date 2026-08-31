@@ -8,9 +8,11 @@ test ! -e /sys/fs/multikernel/device_tree
 
 dpkg -i "$package"
 test "$(getent group kernmux | cut -d: -f1)" = kernmux
-test "$(id -gn kernmux-web)" = kernmux
+test "$(getent group kernmux-admin | cut -d: -f1)" = kernmux-admin
+test "$(id -gn kernmux-web)" = kernmux-admin
+id -nG kernmux-web | tr ' ' '\n' | grep -Fx kernmux >/dev/null
 test "$(stat -c %U:%G:%a /etc/kernmux/kernmuxd.env)" = root:kernmux:640
-test "$(stat -c %U:%G:%a /etc/kernmux/gateway.token)" = kernmux-web:kernmux:400
+test "$(stat -c %U:%G:%a /etc/kernmux/gateway.token)" = kernmux-web:kernmux-admin:400
 test "$(stat -c %U:%G:%a /var/lib/kernmux)" = root:kernmux:750
 test "$(stat -c %U:%G:%a /var/lib/kernmux/images)" = root:kernmux:750
 test "$(systemctl is-enabled kernmuxd.service)" = enabled

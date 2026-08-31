@@ -97,21 +97,25 @@ set -e
 if ! getent group kernmux >/dev/null; then
     addgroup --system kernmux
 fi
+if ! getent group kernmux-admin >/dev/null; then
+    addgroup --system kernmux-admin
+fi
 if ! getent passwd kernmux-web >/dev/null; then
-    adduser --system --ingroup kernmux --home /nonexistent --no-create-home \
+    adduser --system --ingroup kernmux-admin --home /nonexistent --no-create-home \
         --shell /usr/sbin/nologin kernmux-web
 fi
+adduser kernmux-web kernmux >/dev/null
 chown root:kernmux /etc/kernmux/kernmuxd.env
 chmod 0640 /etc/kernmux/kernmuxd.env
 if [ ! -f /etc/kernmux/gateway.token ]; then
     umask 077
     token_file=$(mktemp /etc/kernmux/.gateway.token.XXXXXX)
     head -c 48 /dev/urandom | base64 | tr -d '\n' >"$token_file"
-    chown kernmux-web:kernmux "$token_file"
+    chown kernmux-web:kernmux-admin "$token_file"
     chmod 0400 "$token_file"
     mv -f "$token_file" /etc/kernmux/gateway.token
 fi
-chown kernmux-web:kernmux /etc/kernmux/gateway.token
+chown kernmux-web:kernmux-admin /etc/kernmux/gateway.token
 chmod 0400 /etc/kernmux/gateway.token
 install -d -o root -g kernmux -m 0750 /var/lib/kernmux
 install -d -o root -g kernmux -m 0750 /var/lib/kernmux/images
