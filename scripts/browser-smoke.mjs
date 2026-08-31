@@ -336,17 +336,14 @@ function hostSnapshot(withoutInstance) {
     },
     resource_pool: {
       cpu_hardware_ids: [2, 3],
-      available_cpu_hardware_ids: withoutInstance ? [2, 3] : [],
       memory_regions: [],
-      devices: [],
-      available_device_ids: [],
     },
     instances: withoutInstance ? [] : [{
       id: 1,
       name: "lab",
       generation: 7,
       state: "ready",
-      resources: { cpu_hardware_ids: [2, 3], memory_bytes: 4294967296, device_ids: [] },
+      resources: { cpu_hardware_ids: [2, 3], memory_bytes: 4294967296 },
       image: { present: false },
     }],
     transactions: [{

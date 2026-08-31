@@ -11,7 +11,7 @@ import ServerIcon from "lucide-solid/icons/server"
 import Trash2Icon from "lucide-solid/icons/trash-2"
 import TriangleAlertIcon from "lucide-solid/icons/triangle-alert"
 
-import { ApiClient, type Event, type HostSnapshot, type ImageArtifact, type Instance, type Operation } from "./api"
+import { ApiClient, normalizeHostSnapshot, type Event, type HostSnapshot, type ImageArtifact, type Instance, type Operation } from "./api"
 import { consumeFragmentToken } from "./auth"
 import { ConsoleShell } from "./components/console-shell"
 import DataTableView, { type ConsoleColumn, type ConsoleRow } from "./components/data-table-view"
@@ -80,7 +80,7 @@ export function App() {
         api.result<ImageArtifact[]>("/api/1.0/images"),
         api.result<{ events: Event[] }>("/api/1.0/events?after=0").catch(() => ({ events: [] })),
       ])
-      setHost(nextHost); setImages(nextImages); setEvents(nextEvents.events); setError(undefined)
+      setHost(normalizeHostSnapshot(nextHost)); setImages(nextImages); setEvents(nextEvents.events); setError(undefined)
     } catch (cause) { setError(cause instanceof Error ? cause.message : "The management gateway is unavailable.") }
     finally { setLoading(false) }
   }

@@ -16,6 +16,37 @@ export interface HostSnapshot {
   resource_pool: { cpu_hardware_ids: number[]; available_cpu_hardware_ids: number[]; memory_regions?: Array<{ base: number; bytes: number; numa_node: number }>; devices: Array<{ pci_id: string; pool_name: string; vendor_id?: number; device_id?: number; iommu_group?: number; iommu_group_members?: string[] }>; available_device_ids: string[] };
   instances: Instance[]; transactions: Transaction[]; operations: Operation[];
 }
+
+export function normalizeHostSnapshot(snapshot: HostSnapshot): HostSnapshot {
+  const instances = (snapshot.instances ?? []).map(instance => ({
+    ...instance,
+    resources: {
+      ...instance.resources,
+      cpu_hardware_ids: instance.resources.cpu_hardware_ids ?? [],
+      device_ids: instance.resources.device_ids ?? [],
+    },
+  }))
+  const assignedCpus = new Set(instances.flatMap(instance => instance.resources.cpu_hardware_ids))
+  const assignedDevices = new Set(instances.flatMap(instance => instance.resources.device_ids))
+  const devices = snapshot.resource_pool.devices ?? []
+  return {
+    ...snapshot,
+    diagnostics: snapshot.diagnostics ?? [],
+    instances,
+    transactions: snapshot.transactions ?? [],
+    operations: snapshot.operations ?? [],
+    resource_pool: {
+      ...snapshot.resource_pool,
+      cpu_hardware_ids: snapshot.resource_pool.cpu_hardware_ids ?? [],
+      available_cpu_hardware_ids: snapshot.resource_pool.available_cpu_hardware_ids
+        ?? (snapshot.resource_pool.cpu_hardware_ids ?? []).filter(id => !assignedCpus.has(id)),
+      memory_regions: snapshot.resource_pool.memory_regions ?? [],
+      devices,
+      available_device_ids: snapshot.resource_pool.available_device_ids
+        ?? devices.map(device => device.pci_id).filter(id => !assignedDevices.has(id)),
+    },
+  }
+}
 type ResultEnvelope<T> = { kind: "result"; generation: number; data: T }
 type AcceptedEnvelope = { kind: "accepted"; operation: Operation }
 type ErrorEnvelope = { kind: "error"; error: { message: string } }
