@@ -462,8 +462,11 @@ impl ManagementShell {
                             .primary()
                             .icon(IconName::Plus)
                             .label("New instance")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.dispatch(Intent::CreateInstance, window, cx);
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.action_error = Some(
+                                    "Open the host setup workflow to create an instance.".into(),
+                                );
+                                cx.notify();
                             })),
                     ),
             )
@@ -589,8 +592,11 @@ impl ManagementShell {
                         Button::new("import-image")
                             .primary()
                             .label("Import image")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.dispatch(Intent::ImportImage, window, cx);
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.action_error = Some(
+                                    "Open the host setup workflow to register an image.".into(),
+                                );
+                                cx.notify();
                             })),
                     ),
             )
@@ -654,24 +660,109 @@ impl ManagementShell {
                 )
             }))
     }
+
+    fn global_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .w_full()
+            .h(px(52.))
+            .px_4()
+            .justify_between()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.22))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(div().font_semibold().child("Kernmux"))
+                    .child(Tag::secondary().outline().child("Control Plane")),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Single host inventory"),
+                    )
+                    .child(
+                        Button::new("global-refresh")
+                            .outline()
+                            .label("Refresh")
+                            .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
+                    ),
+            )
+    }
+
+    fn recent_tasks(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let operations = match self.model.data() {
+            DataState::Ready(snapshot) => snapshot.host.operations.as_slice(),
+            _ => &[],
+        };
+        v_flex()
+            .w_full()
+            .h(px(126.))
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .child(
+                h_flex()
+                    .h(px(34.))
+                    .px_4()
+                    .justify_between()
+                    .bg(cx.theme().secondary.opacity(0.18))
+                    .child(div().text_sm().font_semibold().child("Recent Tasks"))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{} operations", operations.len())),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .px_4()
+                    .py_2()
+                    .gap_1()
+                    .children(operations.iter().rev().take(3).map(|operation| {
+                        h_flex()
+                            .justify_between()
+                            .text_sm()
+                            .child(format!("{:?} · {}", operation.kind, operation.id.0))
+                            .child(operation_tag(operation.state))
+                    }))
+                    .children(operations.is_empty().then(|| {
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No recent host tasks")
+                    })),
+            )
+    }
 }
 
 impl Render for ManagementShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        v_flex()
             .size_full()
-            .flex()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.navigation(cx))
+            .child(self.global_header(cx))
             .child(
-                v_flex()
+                h_flex()
                     .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(self.header(cx))
-                    .child(self.content(window, cx)),
+                    .min_h_0()
+                    .child(self.navigation(cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .child(self.header(cx))
+                            .child(self.content(window, cx)),
+                    ),
             )
+            .child(self.recent_tasks(cx))
     }
 }
 

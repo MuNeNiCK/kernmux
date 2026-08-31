@@ -6,8 +6,9 @@ mod browser {
 
     use gloo_timers::future::TimeoutFuture;
     use kernmux_api::v1::{
-        HostSnapshot, ImageArtifact, Instance, InstanceLifecycleMutation, Operation,
-        OperationState, Response as ApiResponse, StopInstanceMutation,
+        CreateInstanceMutation, HostSnapshot, ImageArtifact, ImportImageMutation, Instance,
+        InstanceLifecycleMutation, LoadManagedImageMutation, Operation, OperationState,
+        ResourcePool, ResourcePoolMutation, Response as ApiResponse, StopInstanceMutation,
     };
     use kernmux_ui_model::{Intent, ManagementSnapshot};
     use kernmux_web::{ManagementBackend, ManagementFuture};
@@ -99,55 +100,180 @@ mod browser {
     }
 
     async fn execute_intent(intent: Intent, token: &str) -> Result<(), String> {
-        let envelope = match intent {
+        match intent {
+            Intent::ConfigurePool {
+                expected_generation,
+                cpu_hardware_ids,
+                memory_bytes,
+            } => {
+                finish(
+                    request_json::<ResourcePool, _>(
+                        "PUT",
+                        "/api/1.0/resource-pool",
+                        &ResourcePoolMutation {
+                            expected_generation,
+                            cpu_hardware_ids,
+                            memory_bytes,
+                        },
+                        token,
+                    )
+                    .await?,
+                    token,
+                )
+                .await
+            }
+            Intent::CreateInstance {
+                expected_generation,
+                id,
+                name,
+                cpu_hardware_ids,
+                memory_bytes,
+            } => {
+                finish(
+                    request_json::<Instance, _>(
+                        "POST",
+                        "/api/1.0/instances",
+                        &CreateInstanceMutation {
+                            expected_generation,
+                            id,
+                            name,
+                            cpu_hardware_ids,
+                            memory_bytes,
+                        },
+                        token,
+                    )
+                    .await?,
+                    token,
+                )
+                .await
+            }
+            Intent::ImportImage {
+                expected_generation,
+                kind,
+                source_path,
+                expected_id,
+            } => {
+                finish(
+                    request_json::<ImageArtifact, _>(
+                        "POST",
+                        "/api/1.0/images",
+                        &ImportImageMutation {
+                            expected_generation,
+                            kind,
+                            source_path,
+                            expected_id,
+                        },
+                        token,
+                    )
+                    .await?,
+                    token,
+                )
+                .await
+            }
+            Intent::LoadInstanceImage {
+                id,
+                expected_generation,
+                kernel_id,
+                initrd_id,
+                command_line,
+            } => {
+                finish(
+                    request_json::<Instance, _>(
+                        "POST",
+                        &format!("/api/1.0/instances/{}/load-image", id.0),
+                        &LoadManagedImageMutation {
+                            expected_generation,
+                            kernel_id,
+                            initrd_id,
+                            command_line,
+                        },
+                        token,
+                    )
+                    .await?,
+                    token,
+                )
+                .await
+            }
+            Intent::UnloadInstance {
+                id,
+                expected_generation,
+            } => {
+                finish(
+                    request_json::<Instance, _>(
+                        "POST",
+                        &format!("/api/1.0/instances/{}/unload", id.0),
+                        &InstanceLifecycleMutation {
+                            expected_generation,
+                        },
+                        token,
+                    )
+                    .await?,
+                    token,
+                )
+                .await
+            }
             Intent::StartInstance {
                 id,
                 expected_generation,
             } => {
-                request_json::<Instance, _>(
-                    "POST",
-                    &format!("/api/1.0/instances/{}/start", id.0),
-                    &InstanceLifecycleMutation {
-                        expected_generation,
-                    },
+                finish(
+                    request_json::<Instance, _>(
+                        "POST",
+                        &format!("/api/1.0/instances/{}/start", id.0),
+                        &InstanceLifecycleMutation {
+                            expected_generation,
+                        },
+                        token,
+                    )
+                    .await?,
                     token,
                 )
-                .await?
+                .await
             }
             Intent::StopInstance {
                 id,
                 expected_generation,
                 force,
             } => {
-                request_json::<Instance, _>(
-                    "POST",
-                    &format!("/api/1.0/instances/{}/stop", id.0),
-                    &StopInstanceMutation {
-                        expected_generation,
-                        force,
-                    },
+                finish(
+                    request_json::<Instance, _>(
+                        "POST",
+                        &format!("/api/1.0/instances/{}/stop", id.0),
+                        &StopInstanceMutation {
+                            expected_generation,
+                            force,
+                        },
+                        token,
+                    )
+                    .await?,
                     token,
                 )
-                .await?
+                .await
             }
             Intent::DeleteInstance {
                 id,
                 expected_generation,
             } => {
-                request_json::<Instance, _>(
-                    "DELETE",
-                    &format!("/api/1.0/instances/{}", id.0),
-                    &InstanceLifecycleMutation {
-                        expected_generation,
-                    },
+                finish(
+                    request_json::<Instance, _>(
+                        "DELETE",
+                        &format!("/api/1.0/instances/{}", id.0),
+                        &InstanceLifecycleMutation {
+                            expected_generation,
+                        },
+                        token,
+                    )
+                    .await?,
                     token,
                 )
-                .await?
+                .await
             }
             Intent::Refresh => return Ok(()),
-            _ => return Err("This management action is not available yet.".into()),
-        };
+            _ => Err("This management action is not available yet.".into()),
+        }
+    }
 
+    async fn finish<T>(envelope: ApiResponse<T>, token: &str) -> Result<(), String> {
         match envelope {
             ApiResponse::Result { .. } => Ok(()),
             ApiResponse::Accepted { operation } => wait_for_operation(operation, token).await,

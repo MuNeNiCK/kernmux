@@ -1,7 +1,8 @@
 //! Renderer- and transport-independent state for Kernmux management clients.
 
 use kernmux_api::v1::{
-    Generation, HostSnapshot, ImageArtifact, InstanceId, InstanceState, OperationId, OperationState,
+    Generation, HostSnapshot, ImageArtifact, ImageKind, InstanceId, InstanceState, OperationId,
+    OperationState,
 };
 
 /// Top-level host-management section.
@@ -56,9 +57,35 @@ pub enum DataState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Intent {
     Refresh,
-    CreateInstance,
-    ConfigurePool,
-    ImportImage,
+    ConfigurePool {
+        expected_generation: Generation,
+        cpu_hardware_ids: Vec<u32>,
+        memory_bytes: u64,
+    },
+    CreateInstance {
+        expected_generation: Generation,
+        id: InstanceId,
+        name: String,
+        cpu_hardware_ids: Vec<u32>,
+        memory_bytes: u64,
+    },
+    ImportImage {
+        expected_generation: Generation,
+        kind: ImageKind,
+        source_path: String,
+        expected_id: Option<String>,
+    },
+    LoadInstanceImage {
+        id: InstanceId,
+        expected_generation: Generation,
+        kernel_id: String,
+        initrd_id: Option<String>,
+        command_line: Option<String>,
+    },
+    UnloadInstance {
+        id: InstanceId,
+        expected_generation: Generation,
+    },
     OpenConsole(InstanceId),
     StartInstance {
         id: InstanceId,
@@ -208,10 +235,69 @@ impl ManagementModel {
     fn validate(&self, intent: &Intent) -> Result<(), &'static str> {
         let snapshot = self.snapshot().ok_or("host data is not ready")?;
         match intent {
-            Intent::Refresh
-            | Intent::CreateInstance
-            | Intent::ConfigurePool
-            | Intent::ImportImage => Ok(()),
+            Intent::Refresh => Ok(()),
+            Intent::ConfigurePool {
+                expected_generation,
+                cpu_hardware_ids,
+                memory_bytes,
+            } => {
+                current_generation(snapshot, *expected_generation)?;
+                (!cpu_hardware_ids.is_empty() && *memory_bytes > 0)
+                    .then_some(())
+                    .ok_or("resource pool requires CPU and memory")
+            }
+            Intent::CreateInstance {
+                expected_generation,
+                id,
+                name,
+                cpu_hardware_ids,
+                memory_bytes,
+            } => {
+                current_generation(snapshot, *expected_generation)?;
+                (!name.trim().is_empty()
+                    && !cpu_hardware_ids.is_empty()
+                    && *memory_bytes > 0
+                    && !self.instance_exists(*id))
+                .then_some(())
+                .ok_or("instance configuration is incomplete or conflicts")
+            }
+            Intent::ImportImage {
+                expected_generation,
+                source_path,
+                ..
+            } => {
+                current_generation(snapshot, *expected_generation)?;
+                (!source_path.trim().is_empty())
+                    .then_some(())
+                    .ok_or("image source path is required")
+            }
+            Intent::LoadInstanceImage {
+                id,
+                expected_generation,
+                kernel_id,
+                ..
+            } => {
+                current_generation(snapshot, *expected_generation)?;
+                (!kernel_id.trim().is_empty())
+                    .then_some(())
+                    .ok_or("kernel image is required")?;
+                instance(snapshot, *id).and_then(|item| {
+                    (item.state == InstanceState::Ready)
+                        .then_some(())
+                        .ok_or("load requires a ready instance")
+                })
+            }
+            Intent::UnloadInstance {
+                id,
+                expected_generation,
+            } => {
+                current_generation(snapshot, *expected_generation)?;
+                instance(snapshot, *id).and_then(|item| {
+                    (item.state == InstanceState::Loaded)
+                        .then_some(())
+                        .ok_or("unload requires a loaded instance")
+                })
+            }
             Intent::OpenConsole(id) => instance(snapshot, *id).and_then(|item| {
                 (item.state == InstanceState::Active)
                     .then_some(())
@@ -383,7 +469,11 @@ mod tests {
     fn unavailable_data_never_emits_a_mutation() {
         let mut model = ManagementModel::loading();
         assert_eq!(
-            model.request(Intent::ConfigurePool),
+            model.request(Intent::ConfigurePool {
+                expected_generation: Generation(1),
+                cpu_hardware_ids: vec![2],
+                memory_bytes: 1,
+            }),
             Err("host data is not ready")
         );
         assert_eq!(model.take_intent(), None);
