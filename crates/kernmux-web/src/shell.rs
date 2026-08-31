@@ -19,7 +19,7 @@ use gpui_component::{
 };
 use kernmux_api::v1::{
     Generation, ImageArtifact, ImageKind, Instance, InstanceId, InstanceState, Operation,
-    OperationKind, OperationState, ResourceKind, SnapshotHealth,
+    OperationKind, OperationState, ResourceKind, SnapshotHealth, Transaction, TransactionState,
 };
 use kernmux_ui_model::{
     DataState, Intent, ManagementModel, ManagementSnapshot, Section, parse_cpu_hardware_ids,
@@ -194,6 +194,7 @@ impl ManagementShell {
                         id,
                     ))
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.action_error = None;
                         this.model.select_instance(Some(id));
                         this.model.navigate(Section::Operations);
                         cx.notify();
@@ -205,6 +206,7 @@ impl ManagementShell {
                     .click_to_open(true)
                     .children([monitor])
                     .on_click(cx.listener(move |this, _, _, cx| {
+                        this.action_error = None;
                         this.model.navigate(Section::Instances);
                         this.model.select_instance(Some(id));
                         cx.notify();
@@ -244,6 +246,7 @@ impl ManagementShell {
                                     .icon(IconName::Cpu)
                                     .active(self.model.section() == Section::Resources)
                                     .on_click(cx.listener(|this, _, _, cx| {
+                                        this.action_error = None;
                                         this.model.select_instance(None);
                                         this.model.navigate(Section::Resources);
                                         cx.notify();
@@ -255,12 +258,14 @@ impl ManagementShell {
                                             && self.model.selected_instance().is_none(),
                                     )
                                     .on_click(cx.listener(|this, _, _, cx| {
+                                        this.action_error = None;
                                         this.model.select_instance(None);
                                         this.model.navigate(Section::Operations);
                                         cx.notify();
                                     })),
                             ])
                             .on_click(cx.listener(|this, _, _, cx| {
+                                this.action_error = None;
                                 this.model.select_instance(None);
                                 this.model.navigate(Section::Overview);
                                 cx.notify();
@@ -274,6 +279,7 @@ impl ManagementShell {
                                     && self.model.selected_instance().is_none(),
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
+                                this.action_error = None;
                                 this.model.select_instance(None);
                                 this.model.navigate(Section::Instances);
                                 cx.notify();
@@ -286,6 +292,7 @@ impl ManagementShell {
                             .icon(IconName::HardDrive)
                             .active(self.model.section() == Section::Images)
                             .on_click(cx.listener(|this, _, _, cx| {
+                                this.action_error = None;
                                 this.model.select_instance(None);
                                 this.model.navigate(Section::Images);
                                 cx.notify();
@@ -337,6 +344,7 @@ impl ManagementShell {
                         .label("Summary")
                         .selected(section == Section::Instances)
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            this.action_error = None;
                             this.model.select_instance(Some(id));
                             this.model.navigate(Section::Instances);
                             cx.notify();
@@ -349,6 +357,7 @@ impl ManagementShell {
                         .label("Monitor")
                         .selected(section == Section::Operations)
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            this.action_error = None;
                             this.model.select_instance(Some(id));
                             this.model.navigate(Section::Operations);
                             cx.notify();
@@ -361,6 +370,7 @@ impl ManagementShell {
                         .label("Manage")
                         .selected(section == Section::Resources)
                         .on_click(cx.listener(move |this, _, _, cx| {
+                            this.action_error = None;
                             this.model.select_instance(Some(id));
                             this.model.navigate(Section::Resources);
                             cx.notify();
@@ -384,6 +394,7 @@ impl ManagementShell {
                         .label("Summary")
                         .selected(section == Section::Overview)
                         .on_click(cx.listener(|this, _, _, cx| {
+                            this.action_error = None;
                             this.model.navigate(Section::Overview);
                             cx.notify();
                         })),
@@ -395,6 +406,7 @@ impl ManagementShell {
                         .label("Monitor")
                         .selected(section == Section::Operations)
                         .on_click(cx.listener(|this, _, _, cx| {
+                            this.action_error = None;
                             this.model.navigate(Section::Operations);
                             cx.notify();
                         })),
@@ -406,6 +418,7 @@ impl ManagementShell {
                         .label("Manage")
                         .selected(section == Section::Resources)
                         .on_click(cx.listener(|this, _, _, cx| {
+                            this.action_error = None;
                             this.model.navigate(Section::Resources);
                             cx.notify();
                         })),
@@ -1370,6 +1383,7 @@ impl ManagementShell {
             .cursor_pointer()
             .hover(|style| style.bg(cx.theme().secondary.opacity(0.35)))
             .on_click(cx.listener(move |this, _, _, cx| {
+                this.action_error = None;
                 this.model.navigate(Section::Instances);
                 this.model.select_instance(Some(id));
                 cx.notify();
@@ -1465,6 +1479,7 @@ impl ManagementShell {
                             .outline()
                             .label("Monitor")
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                this.action_error = None;
                                 this.model.select_instance(Some(id));
                                 this.model.navigate(Section::Operations);
                                 cx.notify();
@@ -1830,50 +1845,46 @@ impl ManagementShell {
         snapshot: &ManagementSnapshot,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let empty = snapshot.host.operations.is_empty() && snapshot.host.transactions.is_empty();
+        let operations = &snapshot.host.operations;
+        let transactions = &snapshot.host.transactions;
+        let operation_failures = operations
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.state,
+                    OperationState::Failed | OperationState::Indeterminate
+                )
+            })
+            .count();
+        let transaction_failures = transactions
+            .iter()
+            .filter(|item| item.state == TransactionState::Failed)
+            .count();
         v_flex()
             .w_full()
             .gap_3()
-            .children(
-                snapshot
-                    .host
-                    .operations
-                    .iter()
-                    .map(|operation| operation_row(operation, cx)),
+            .child(
+                h_flex()
+                    .min_h(px(38.))
+                    .gap_5()
+                    .px_3()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().secondary.opacity(0.16))
+                    .child(activity_count("Operations", operations.len(), cx))
+                    .child(activity_count(
+                        "Resource transactions",
+                        transactions.len(),
+                        cx,
+                    ))
+                    .child(activity_count(
+                        "Needs attention",
+                        operation_failures + transaction_failures,
+                        cx,
+                    )),
             )
-            .children(snapshot.host.transactions.iter().map(|transaction| {
-                card(cx)
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .font_medium()
-                                    .child(format!("Transaction {}", transaction.id)),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Atomic resource allocation change"),
-                            ),
-                    )
-                    .child(
-                        Tag::secondary()
-                            .outline()
-                            .child(format!("{:?}", transaction.state)),
-                    )
-            }))
-            .children(empty.then(|| {
-                empty_state(
-                    "No recent operations",
-                    "Lifecycle operations and resource transactions will appear here.",
-                    cx,
-                )
-            }))
+            .child(operation_table(operations, cx))
+            .child(transaction_table(transactions, cx))
     }
 
     fn instance_monitor(
@@ -1899,6 +1910,7 @@ impl ManagementShell {
                             .outline()
                             .label("Summary")
                             .on_click(cx.listener(move |this, _, _, cx| {
+                                this.action_error = None;
                                 this.model.select_instance(Some(id));
                                 this.model.navigate(Section::Instances);
                                 cx.notify();
@@ -1967,10 +1979,16 @@ impl ManagementShell {
     }
 
     fn recent_tasks(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let operations = match self.model.data() {
-            DataState::Ready(snapshot) => snapshot.host.operations.as_slice(),
-            _ => &[],
+        let (operations, transactions) = match self.model.data() {
+            DataState::Ready(snapshot) => (
+                snapshot.host.operations.as_slice(),
+                snapshot.host.transactions.as_slice(),
+            ),
+            _ => (&[][..], &[][..]),
         };
+        let activity_count = operations.len() + transactions.len();
+        let operation_rows = operations.len().min(3);
+        let transaction_rows = 3usize.saturating_sub(operation_rows);
         let collapsed = self.recent_tasks_collapsed;
         v_flex()
             .w_full()
@@ -1984,7 +2002,7 @@ impl ManagementShell {
                     .px_4()
                     .justify_between()
                     .bg(cx.theme().secondary.opacity(0.18))
-                    .child(div().text_sm().font_semibold().child("Recent Tasks"))
+                    .child(div().text_sm().font_semibold().child("Recent Activity"))
                     .child(
                         h_flex()
                             .gap_3()
@@ -1992,7 +2010,7 @@ impl ManagementShell {
                                 div()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{} tasks", operations.len())),
+                                    .child(format!("{activity_count} entries")),
                             )
                             .child(
                                 Button::new("toggle-recent-tasks")
@@ -2013,43 +2031,95 @@ impl ManagementShell {
                             .bg(cx.theme().secondary.opacity(0.22))
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(div().w(px(180.)).child("Task"))
-                            .child(div().w(px(180.)).child("Target"))
-                            .child(div().flex_1().child("Started"))
+                            .child(div().w(px(180.)).child("Activity"))
+                            .child(div().w(px(180.)).child("Scope"))
+                            .child(div().flex_1().child("Generation / Started"))
                             .child(div().w(px(110.)).child("Result")),
                     )
-                    .children(operations.iter().rev().take(3).map(|operation| {
-                        h_flex()
-                            .h(px(27.))
-                            .px_3()
-                            .border_t_1()
-                            .border_color(cx.theme().border)
-                            .text_xs()
-                            .child(
-                                div()
-                                    .w(px(180.))
-                                    .font_medium()
-                                    .child(operation_label(operation.kind)),
-                            )
-                            .child(
-                                div()
-                                    .w(px(180.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(operation_target(operation)),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(display_timestamp(&operation.created_at)),
-                            )
-                            .child(div().w(px(110.)).child(operation_tag(operation.state)))
-                    }))
-                    .children(operations.is_empty().then(|| {
+                    .children(
+                        operations
+                            .iter()
+                            .rev()
+                            .take(operation_rows)
+                            .map(|operation| {
+                                h_flex()
+                                    .h(px(27.))
+                                    .px_3()
+                                    .border_t_1()
+                                    .border_color(cx.theme().border)
+                                    .text_xs()
+                                    .child(
+                                        div()
+                                            .w(px(180.))
+                                            .font_medium()
+                                            .child(operation_label(operation.kind)),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(180.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(operation_target(operation)),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(display_timestamp(&operation.created_at)),
+                                    )
+                                    .child(div().w(px(110.)).child(operation_tag(operation.state)))
+                            }),
+                    )
+                    .children(
+                        transactions
+                            .iter()
+                            .rev()
+                            .take(transaction_rows)
+                            .map(|transaction| {
+                                let generation = match (
+                                    transaction.generation_before,
+                                    transaction.generation_after,
+                                ) {
+                                    (Some(before), Some(after)) => {
+                                        format!("{} → {}", before.0, after.0)
+                                    }
+                                    _ => "Not reported".to_owned(),
+                                };
+                                h_flex()
+                                    .h(px(27.))
+                                    .px_3()
+                                    .border_t_1()
+                                    .border_color(cx.theme().border)
+                                    .text_xs()
+                                    .child(
+                                        div()
+                                            .w(px(180.))
+                                            .font_medium()
+                                            .child(format!("Transaction {}", transaction.id)),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(180.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Resource allocation"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(generation),
+                                    )
+                                    .child(
+                                        div().w(px(110.)).child(transaction_tag(transaction.state)),
+                                    )
+                            }),
+                    )
+                    .children((activity_count == 0).then(|| {
                         div()
+                            .px_3()
+                            .py_2()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("No recent host tasks")
+                            .child("No host activity is available")
                     }))
             }))
     }
@@ -2398,6 +2468,185 @@ fn image_row(image: &ImageArtifact, cx: &App) -> impl IntoElement {
         .child(Tag::info().outline().child(format!("{:?}", image.kind)))
 }
 
+fn activity_count(label: &str, value: usize, cx: &App) -> impl IntoElement {
+    h_flex()
+        .gap_2()
+        .child(div().text_lg().font_semibold().child(value.to_string()))
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(label.to_owned()),
+        )
+}
+
+fn operation_table(operations: &[Operation], cx: &App) -> gpui::Div {
+    v_flex()
+        .w_full()
+        .border_1()
+        .border_color(cx.theme().border)
+        .child(
+            h_flex()
+                .h(px(32.))
+                .px_3()
+                .bg(cx.theme().secondary.opacity(0.28))
+                .font_semibold()
+                .child("Operations"),
+        )
+        .child(
+            h_flex()
+                .h(px(28.))
+                .px_3()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(div().w(px(210.)).child("Task"))
+                .child(div().w(px(170.)).child("Target"))
+                .child(div().w(px(110.)).child("Started"))
+                .child(div().w(px(130.)).child("Generation"))
+                .child(div().flex_1().child("Result")),
+        )
+        .children(operations.iter().map(|operation| {
+            let generation = operation.observed_generation.map_or_else(
+                || format!("{} → —", operation.expected_generation.0),
+                |observed| format!("{} → {}", operation.expected_generation.0, observed.0),
+            );
+            let result = operation.error.as_ref().map_or_else(
+                || operation_state_label(operation.state).to_owned(),
+                |error| error.message.clone(),
+            );
+            h_flex()
+                .min_h(px(34.))
+                .px_3()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_sm()
+                .child(
+                    div()
+                        .w(px(210.))
+                        .min_w_0()
+                        .font_medium()
+                        .child(operation_label(operation.kind)),
+                )
+                .child(
+                    div()
+                        .w(px(170.))
+                        .min_w_0()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(operation_target(operation)),
+                )
+                .child(
+                    div()
+                        .w(px(110.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(display_timestamp(&operation.created_at)),
+                )
+                .child(div().w(px(130.)).child(generation))
+                .child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_2()
+                        .child(operation_tag(operation.state))
+                        .child(div().min_w_0().text_xs().child(result)),
+                )
+        }))
+        .children(operations.is_empty().then(|| {
+            div()
+                .px_3()
+                .py_3()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("No asynchronous operations are retained by this daemon session.")
+        }))
+}
+
+fn transaction_table(transactions: &[Transaction], cx: &App) -> gpui::Div {
+    v_flex()
+        .w_full()
+        .border_1()
+        .border_color(cx.theme().border)
+        .child(
+            h_flex()
+                .h(px(32.))
+                .px_3()
+                .bg(cx.theme().secondary.opacity(0.28))
+                .font_semibold()
+                .child("Resource Transactions"),
+        )
+        .child(
+            h_flex()
+                .h(px(28.))
+                .px_3()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(div().w(px(150.)).child("Transaction"))
+                .child(div().w(px(130.)).child("State"))
+                .child(div().w(px(170.)).child("Generation"))
+                .child(div().flex_1().child("Diagnostic")),
+        )
+        .children(transactions.iter().map(|transaction| {
+            let generations = match (transaction.generation_before, transaction.generation_after) {
+                (Some(before), Some(after)) => format!("{} → {}", before.0, after.0),
+                (Some(before), None) => format!("{} → —", before.0),
+                (None, Some(after)) => format!("— → {}", after.0),
+                (None, None) => "Not reported".to_owned(),
+            };
+            let diagnostic = transaction.diagnostics.first().map_or_else(
+                || {
+                    if transaction.state == TransactionState::Failed {
+                        "No diagnostic reported by the kernel".to_owned()
+                    } else {
+                        "No diagnostic".to_owned()
+                    }
+                },
+                |item| format!("{}: {}", item.code, item.message),
+            );
+            h_flex()
+                .min_h(px(36.))
+                .px_3()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_sm()
+                .bg(if transaction.state == TransactionState::Failed {
+                    cx.theme().danger.opacity(0.06)
+                } else {
+                    cx.theme().background
+                })
+                .child(
+                    div()
+                        .w(px(150.))
+                        .font_medium()
+                        .child(format!("Transaction {}", transaction.id)),
+                )
+                .child(div().w(px(130.)).child(transaction_tag(transaction.state)))
+                .child(div().w(px(170.)).child(generations))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(diagnostic),
+                )
+        }))
+        .children(transactions.is_empty().then(|| {
+            div()
+                .px_3()
+                .py_3()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("No resource transactions are exposed by the running kernel.")
+        }))
+}
+
 fn operation_row(operation: &Operation, cx: &App) -> impl IntoElement {
     card(cx)
         .child(
@@ -2475,6 +2724,28 @@ fn operation_tag(state: OperationState) -> Tag {
         }
         OperationState::Cancelled => Tag::warning().outline().child("Cancelled"),
         OperationState::Unknown => Tag::warning().outline().child("Unknown"),
+    }
+}
+
+fn operation_state_label(state: OperationState) -> &'static str {
+    match state {
+        OperationState::Succeeded => "Succeeded",
+        OperationState::Running => "Running",
+        OperationState::Queued => "Queued",
+        OperationState::Failed => "Failed",
+        OperationState::Indeterminate => "Outcome unknown",
+        OperationState::Cancelled => "Cancelled",
+        OperationState::Unknown => "Unknown",
+    }
+}
+
+fn transaction_tag(state: TransactionState) -> Tag {
+    match state {
+        TransactionState::Applied => Tag::success().outline().child("Applied"),
+        TransactionState::Planned => Tag::info().outline().child("Planned"),
+        TransactionState::RolledBack => Tag::warning().outline().child("Rolled back"),
+        TransactionState::Failed => Tag::danger().outline().child("Failed"),
+        TransactionState::Unknown => Tag::warning().outline().child("Unknown"),
     }
 }
 
