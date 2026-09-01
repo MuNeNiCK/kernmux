@@ -28,6 +28,8 @@ async fn main() {
         || PathBuf::from("/run/kernmux/kernmuxd.sock"),
         PathBuf::from,
     ));
+    let mut config = config;
+    config.daemon_socket = transport.socket_path().to_owned();
     let gateway = Gateway::new(config, transport).expect("validated gateway configuration");
     if let Err(error) = gateway.serve(listener, shutdown()).await {
         eprintln!("gateway stopped: {error}");

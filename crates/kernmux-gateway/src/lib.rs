@@ -1,5 +1,7 @@
 //! Authenticated, unprivileged browser gateway for the local management API.
 
+mod browser_console;
+
 use std::{
     collections::BTreeSet,
     convert::Infallible,
@@ -36,6 +38,7 @@ pub struct GatewayConfig {
     pub bearer_token: String,
     pub allowed_origins: BTreeSet<String>,
     pub assets_dir: PathBuf,
+    pub daemon_socket: PathBuf,
     pub max_request_bytes: usize,
     pub max_connections: usize,
 }
@@ -49,6 +52,7 @@ impl std::fmt::Debug for GatewayConfig {
             .field("bearer_token", &"[REDACTED]")
             .field("allowed_origins", &self.allowed_origins)
             .field("assets_dir", &self.assets_dir)
+            .field("daemon_socket", &self.daemon_socket)
             .field("max_request_bytes", &self.max_request_bytes)
             .field("max_connections", &self.max_connections)
             .finish()
@@ -67,6 +71,7 @@ impl GatewayConfig {
                 "http://localhost:9443".into(),
             ]),
             assets_dir,
+            daemon_socket: PathBuf::from("/run/kernmux/kernmuxd.sock"),
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             max_connections: 64,
         }
@@ -164,9 +169,10 @@ where
                     tokio::spawn(async move {
                         let service = service_fn(move |request| gateway.clone().handle(request));
                         let _ = http1::Builder::new()
-                            .keep_alive(false)
+                            .keep_alive(true)
                             .max_buf_size(32 * 1024)
                             .serve_connection(TokioIo::new(stream), service)
+                            .with_upgrades()
                             .await;
                     });
                 }
@@ -178,7 +184,7 @@ where
         self,
         request: HttpRequest<Incoming>,
     ) -> Result<HttpResponse<Full<Bytes>>, Infallible> {
-        let Ok(_permit) = self.permits.clone().try_acquire_owned() else {
+        let Ok(permit) = self.permits.clone().try_acquire_owned() else {
             return Ok(error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "gateway_busy",
@@ -190,6 +196,34 @@ where
                 "ok\n",
                 "text/plain; charset=utf-8",
             ));
+        }
+        if request.uri().path().ends_with("/console") {
+            let origin_allowed = request
+                .headers()
+                .get(ORIGIN)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|origin| self.config.allowed_origins.contains(origin));
+            let request_id = request
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+                .filter(|value| valid_request_id(value))
+                .map_or_else(generated_request_id, str::to_owned);
+            return Ok(
+                match browser_console::upgrade(
+                    request,
+                    &self.config.bearer_token,
+                    origin_allowed,
+                    &self.config.daemon_socket,
+                    &request_id,
+                    permit,
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(rejection) => error_response(rejection.status, rejection.code),
+                },
+            );
         }
         if request.uri().path().starts_with("/api/") {
             return Ok(self.handle_api(request).await);
@@ -467,6 +501,7 @@ fn secure_response(
     HttpResponse::builder()
         .status(status)
         .header(CONTENT_TYPE, content_type)
+        .header("connection", "close")
         .header("cache-control", "no-store")
         .header("content-security-policy", "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'")
         .header("referrer-policy", "no-referrer")
@@ -634,7 +669,7 @@ mod tests {
                 address,
                 &authorized_request("GET", "/api/1.0/instances/4/console", None, ""),
             ),
-            404,
+            403,
         );
         assert_status(
             &exchange(

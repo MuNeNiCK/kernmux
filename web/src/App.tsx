@@ -1,4 +1,4 @@
-import { For, Match, Show, Switch, createMemo, createSignal, onCleanup, onMount, type JSX } from "solid-js"
+import { For, Match, Show, Switch, createMemo, createSignal, lazy, onCleanup, onMount, type JSX } from "solid-js"
 import ChevronDownIcon from "lucide-solid/icons/chevron-down"
 import CircleAlertIcon from "lucide-solid/icons/circle-alert"
 import PlayIcon from "lucide-solid/icons/play"
@@ -6,6 +6,7 @@ import PowerIcon from "lucide-solid/icons/power"
 import RefreshCwIcon from "lucide-solid/icons/refresh-cw"
 import ServerIcon from "lucide-solid/icons/server"
 import SquareIcon from "lucide-solid/icons/square"
+import SquareTerminalIcon from "lucide-solid/icons/square-terminal"
 
 import { availableActions } from "@/actions"
 import { ApiError, KernmuxApi } from "@/api"
@@ -26,6 +27,8 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { bytes, label, timestamp } from "@/format"
 import type { AcceptedEnvelope, EventPage, HostSnapshot, ImageArtifact, Instance, Operation } from "@/model"
 import { parseRoute, routeHref, type Route, type ViewTab } from "@/route"
+
+const InstanceConsole = lazy(() => import("@/components/instance-console").then((module) => ({ default: module.InstanceConsole })))
 
 export default function App() {
   const credential = initializeToken()
@@ -102,7 +105,7 @@ export default function App() {
             <Match when={route().kind === "host"}><HostView host={snapshot()} route={route() as Extract<Route, { kind: "host" }>} operations={operations()} events={events()} /></Match>
             <Match when={route().kind === "instances"}><InstancesView host={snapshot()} busy={busyInstance() !== undefined} onCreate={async (input) => { const succeeded = await finishMutation(0, () => api!.createInstance({ expected_generation: snapshot().generation, ...input })); if (succeeded) window.location.hash = `#/instances/${input.id}/summary`; return succeeded }} /></Match>
             <Match when={route().kind === "instance"}>
-              <InstanceRouteView host={snapshot()} images={images()} route={route() as Extract<Route, { kind: "instance" }>} operations={operations()} busy={busyInstance()} onLifecycle={lifecycle} onUpdate={(instance, input) => finishMutation(instance.id, () => api!.updateInstance(instance.id, { expected_generation: instance.generation, ...input }))} onLoad={(instance, input) => finishMutation(instance.id, () => api!.loadManagedImage(instance.id, { expected_generation: instance.generation, ...input }))} onDelete={async (instance) => { const succeeded = await finishMutation(instance.id, () => api!.deleteInstance(instance.id, instance.generation)); if (succeeded) window.location.hash = "#/instances"; return succeeded }} />
+              <InstanceRouteView host={snapshot()} images={images()} credential={credential} route={route() as Extract<Route, { kind: "instance" }>} operations={operations()} busy={busyInstance()} onLifecycle={lifecycle} onUpdate={(instance, input) => finishMutation(instance.id, () => api!.updateInstance(instance.id, { expected_generation: instance.generation, ...input }))} onLoad={(instance, input) => finishMutation(instance.id, () => api!.loadManagedImage(instance.id, { expected_generation: instance.generation, ...input }))} onDelete={async (instance) => { const succeeded = await finishMutation(instance.id, () => api!.deleteInstance(instance.id, instance.generation)); if (succeeded) window.location.hash = "#/instances"; return succeeded }} />
             </Match>
             <Match when={route().kind === "images"}><ImagesView host={snapshot()} images={images()} busy={busyInstance() !== undefined} onImport={(input) => finishMutation(0, () => api!.importImage({ expected_generation: snapshot().generation, ...input }))} /></Match>
           </Switch>
@@ -175,18 +178,19 @@ function InstancesView(props: { host: HostSnapshot; busy: boolean; onCreate: (in
   return <div class="min-h-full px-4 pt-4 pb-7 md:px-8 md:pt-6"><header class="flex items-start justify-between gap-4"><div><p class="text-xs text-muted-foreground">Inventory</p><h1 class="mt-1 text-[28px] font-[750]">Instances</h1><p class="mt-2 text-sm text-muted-foreground">{props.host.instances.length} peer-kernel instances on this host</p></div><Button size="sm" onClick={() => setOpen(true)}>New Instance</Button></header><section class="mt-5 border-y"><InstanceTable instances={props.host.instances} /></section><CreateInstanceDialog open={open()} onOpenChange={setOpen} busy={props.busy} host={props.host} onSubmit={props.onCreate} /></div>
 }
 
-function InstanceRouteView(props: { host: HostSnapshot; images: ImageArtifact[]; route: Extract<Route, { kind: "instance" }>; operations: Operation[]; busy?: number; onLifecycle: (instance: Instance, action: "start" | "stop" | "unload") => Promise<boolean>; onUpdate: (instance: Instance, input: { cpu_hardware_ids?: number[]; memory_bytes?: number; device_ids?: string[]; dry_run: boolean }) => Promise<boolean>; onLoad: (instance: Instance, input: { kernel_id: string; initrd_id?: string; command_line?: string }) => Promise<boolean>; onDelete: (instance: Instance) => Promise<boolean> }) {
+function InstanceRouteView(props: { host: HostSnapshot; images: ImageArtifact[]; credential: string; route: Extract<Route, { kind: "instance" }>; operations: Operation[]; busy?: number; onLifecycle: (instance: Instance, action: "start" | "stop" | "unload") => Promise<boolean>; onUpdate: (instance: Instance, input: { cpu_hardware_ids?: number[]; memory_bytes?: number; device_ids?: string[]; dry_run: boolean }) => Promise<boolean>; onLoad: (instance: Instance, input: { kernel_id: string; initrd_id?: string; command_line?: string }) => Promise<boolean>; onDelete: (instance: Instance) => Promise<boolean> }) {
   const instance = createMemo(() => props.host.instances.find((item) => item.id === props.route.id))
   return <Show when={instance()} fallback={<div class="p-8"><Alert variant="destructive"><CircleAlertIcon /><AlertTitle>Instance not found</AlertTitle><AlertDescription>The selected instance is no longer present in the authoritative host inventory.</AlertDescription></Alert></div>}>
-    {(selected) => <ObjectView scope="Instances" title={selected().name} state={selected().state} tab={props.route.tab} base={`instances/${selected().id}`} actions={<InstanceActions instance={selected()} busy={props.busy === selected().id} onLifecycle={props.onLifecycle} />}>
+    {(selected) => <ObjectView scope="Instances" title={selected().name} state={selected().state} tab={props.route.tab} base={`instances/${selected().id}`} actions={<InstanceActions instance={selected()} credential={props.credential} consoleAvailable={props.host.capabilities.includes("console")} busy={props.busy === selected().id} onLifecycle={props.onLifecycle} />}>
       <Switch><Match when={props.route.tab === "summary"}><InstanceSummary instance={selected()} /></Match><Match when={props.route.tab === "monitor"}><section><SectionHeading title="Instance tasks" meta="Retained operations" /><OperationsTable operations={props.operations.filter((operation) => operation.affected_resources?.some((item) => item.kind === "instance" && item.id === String(selected().id)))} /></section></Match><Match when={props.route.tab === "manage"}><InstanceManage instance={selected()} images={props.images} busy={props.busy === selected().id} onUpdate={props.onUpdate} onLoad={props.onLoad} onDelete={props.onDelete} /></Match></Switch>
     </ObjectView>}
   </Show>
 }
 
-function InstanceActions(props: { instance: Instance; busy: boolean; onLifecycle: (instance: Instance, action: "start" | "stop" | "unload") => Promise<boolean> }) {
+function InstanceActions(props: { instance: Instance; credential: string; consoleAvailable: boolean; busy: boolean; onLifecycle: (instance: Instance, action: "start" | "stop" | "unload") => Promise<boolean> }) {
   const actions = () => availableActions(props.instance.state)
-  return <><Show when={actions().includes("start")}><Button size="sm" disabled={props.busy} onClick={() => void props.onLifecycle(props.instance, "start")}><PlayIcon aria-hidden="true" />Start</Button></Show><Show when={actions().includes("stop")}><Button variant="secondary" size="sm" disabled={props.busy} onClick={() => void props.onLifecycle(props.instance, "stop")}><PowerIcon aria-hidden="true" />Stop</Button></Show><DropdownMenu><DropdownMenuTrigger class={buttonVariants({ variant: "outline", size: "sm" })}>Actions<ChevronDownIcon aria-hidden="true" /></DropdownMenuTrigger><DropdownMenuPortal><DropdownMenuContent><DropdownMenuItem disabled={!actions().includes("unload") || props.busy} onSelect={() => void props.onLifecycle(props.instance, "unload")}><SquareIcon aria-hidden="true" />Unload image</DropdownMenuItem><DropdownMenuItem onSelect={() => { window.location.hash = `#/instances/${props.instance.id}/manage` }}>Manage settings</DropdownMenuItem></DropdownMenuContent></DropdownMenuPortal></DropdownMenu></>
+  const [consoleOpen, setConsoleOpen] = createSignal(false)
+  return <><Show when={props.instance.state === "active" && props.consoleAvailable}><Button variant="outline" size="sm" disabled={props.busy} onClick={() => setConsoleOpen(true)}><SquareTerminalIcon aria-hidden="true" />Console</Button></Show><Show when={actions().includes("start")}><Button size="sm" disabled={props.busy} onClick={() => void props.onLifecycle(props.instance, "start")}><PlayIcon aria-hidden="true" />Start</Button></Show><Show when={actions().includes("stop")}><Button variant="secondary" size="sm" disabled={props.busy} onClick={() => void props.onLifecycle(props.instance, "stop")}><PowerIcon aria-hidden="true" />Stop</Button></Show><DropdownMenu><DropdownMenuTrigger class={buttonVariants({ variant: "outline", size: "sm" })}>Actions<ChevronDownIcon aria-hidden="true" /></DropdownMenuTrigger><DropdownMenuPortal><DropdownMenuContent><DropdownMenuItem disabled={!actions().includes("unload") || props.busy} onSelect={() => void props.onLifecycle(props.instance, "unload")}><SquareIcon aria-hidden="true" />Unload image</DropdownMenuItem><DropdownMenuItem onSelect={() => { window.location.hash = `#/instances/${props.instance.id}/manage` }}>Manage settings</DropdownMenuItem></DropdownMenuContent></DropdownMenuPortal></DropdownMenu><Show when={consoleOpen()}><InstanceConsole instanceId={props.instance.id} name={props.instance.name} token={props.credential} onClose={() => setConsoleOpen(false)} /></Show></>
 }
 
 function InstanceSummary(props: { instance: Instance }) {

@@ -74,7 +74,10 @@ impl ConsoleDeviceFactory for MkttyDeviceFactory {
     type Device = File;
 
     fn open(&self) -> io::Result<Self::Device> {
-        OpenOptions::new().read(true).write(true).open(&self.path)
+        let device = OpenOptions::new().read(true).write(true).open(&self.path)?;
+        let flags = rustix::fs::fcntl_getfl(&device)?;
+        rustix::fs::fcntl_setfl(&device, flags | rustix::fs::OFlags::NONBLOCK)?;
+        Ok(device)
     }
 }
 
@@ -212,6 +215,7 @@ impl std::error::Error for ConsoleProtocolError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConsoleRead {
     Data(Vec<u8>),
+    Pending,
     Closed(ConsoleCloseReason),
 }
 
@@ -366,6 +370,7 @@ where
             }
         };
         match read {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(ConsoleRead::Pending),
             Ok(0) => Ok(ConsoleRead::Closed(
                 self.close(ConsoleCloseReason::EndOfStream),
             )),
@@ -482,6 +487,9 @@ where
             FRAME_READ if payload.is_empty() => match session.read_frame() {
                 Ok(ConsoleRead::Data(data)) => {
                     write_protocol_frame(client, FRAME_OUTPUT, &data)?;
+                }
+                Ok(ConsoleRead::Pending) => {
+                    write_protocol_frame(client, FRAME_ACK, &[])?;
                 }
                 Ok(ConsoleRead::Closed(reason)) => {
                     write_close(client, reason)?;
@@ -648,6 +656,7 @@ mod tests {
         output: Arc<Mutex<Vec<u8>>>,
         max_write: usize,
         first_write: bool,
+        pending_reads: usize,
     }
 
     impl FakeDevice {
@@ -657,12 +666,22 @@ mod tests {
                 output,
                 max_write,
                 first_write: true,
+                pending_reads: 0,
             }
+        }
+
+        fn with_pending_read(mut self) -> Self {
+            self.pending_reads = 1;
+            self
         }
     }
 
     impl Read for FakeDevice {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.pending_reads > 0 {
+                self.pending_reads -= 1;
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
             self.input.read(buffer)
         }
     }
@@ -752,6 +771,23 @@ mod tests {
             output.lock().unwrap().as_slice(),
             [b'7', b'\n', 0xfe, 0, b'\r']
         );
+    }
+
+    #[test]
+    fn nonblocking_device_without_output_keeps_session_available_for_input() {
+        let (device, output) = device(b"ready".to_vec(), 8);
+        let proxy =
+            ConsoleProxy::with_frame_limit(FakeFactory::new([device.with_pending_read()]), 8)
+                .unwrap();
+        let mut session = proxy.attach(InstanceId(7)).unwrap();
+
+        assert_eq!(session.read_frame().unwrap(), ConsoleRead::Pending);
+        session.write_frame(b"input").unwrap();
+        assert_eq!(
+            session.read_frame().unwrap(),
+            ConsoleRead::Data(b"ready".to_vec())
+        );
+        assert_eq!(output.lock().unwrap().as_slice(), b"7\ninput");
     }
 
     #[test]
