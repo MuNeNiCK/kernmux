@@ -2,9 +2,6 @@
 
 ## Prerequisites
 
-Use a disposable VM for initial validation. Hardware installation should follow
-only after the same release has passed the VM acceptance harness.
-
 The host must already have:
 
 1. Ubuntu 24.04 x86-64;

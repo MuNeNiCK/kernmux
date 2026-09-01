@@ -63,11 +63,6 @@ Each of `start`, `stop`, `unload`, `delete`, and `pool release` follows the same
 wait-refresh-generation pattern. The authoritative lifecycle states are
 `ready`, `loaded`, and `active`.
 
-For an end-to-end executable example, use
-`packaging/acceptance/multikernel-vm.sh` in a disposable VM. It builds a tiny
-static-busybox initramfs, imports both managed images, verifies sustained active
-state, and returns the VM to no-instance/no-pool state.
-
 ## Safe recovery
 
 Start with read-only evidence:

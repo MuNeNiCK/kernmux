@@ -6,11 +6,13 @@ package_version=${KERNMUX_PACKAGE_VERSION:-0.1.0-1}
 package_arch=${KERNMUX_PACKAGE_ARCH:-amd64}
 rust_target=${KERNMUX_RUST_TARGET:-x86_64-unknown-linux-musl}
 output_dir=${KERNMUX_OUTPUT_DIR:-"$repo_root/dist"}
+use_prebuilt_web=${KERNMUX_WEB_USE_PREBUILT:-0}
 source_date_epoch=${SOURCE_DATE_EPOCH:-$(git -C "$repo_root" log -1 --format=%ct)}
 export SOURCE_DATE_EPOCH=$source_date_epoch
 daemon_binary="$repo_root/target/$rust_target/release/kernmuxd"
 client_binary="$repo_root/target/$rust_target/release/kernmuxctl"
 gateway_binary="$repo_root/target/$rust_target/release/kernmux-gateway"
+web_assets="$repo_root/dist/web"
 
 case "$package_version" in
     ''|*[!0-9A-Za-z.+:~_-]*)
@@ -18,9 +20,25 @@ case "$package_version" in
         exit 2
         ;;
 esac
+case "$use_prebuilt_web" in
+    0|1) ;;
+    *)
+        echo "KERNMUX_WEB_USE_PREBUILT must be 0 or 1" >&2
+        exit 2
+        ;;
+esac
 if ! command -v dpkg-deb >/dev/null 2>&1; then
     echo "dpkg-deb is required" >&2
     exit 3
+fi
+
+if [ "$use_prebuilt_web" -eq 0 ]; then
+    "$repo_root/scripts/build-web.sh"
+else
+    test -f "$web_assets/index.html" || {
+        echo "missing prebuilt web entrypoint: index.html" >&2
+        exit 4
+    }
 fi
 
 if [ ! -x "$daemon_binary" ] || [ ! -x "$client_binary" ] || [ ! -x "$gateway_binary" ]; then
@@ -33,10 +51,13 @@ trap 'rm -rf -- "$stage"' EXIT HUP INT TERM
 chmod 0755 "$stage"
 
 install -d "$stage/DEBIAN" "$stage/usr/bin" "$stage/lib/systemd/system"
-install -d "$stage/etc/kernmux" "$stage/usr/share/doc/kernmux"
+install -d "$stage/etc/kernmux" "$stage/usr/share/doc/kernmux" "$stage/usr/share/kernmux/web"
 install -m 0755 "$daemon_binary" "$stage/usr/bin/kernmuxd"
 install -m 0755 "$client_binary" "$stage/usr/bin/kernmuxctl"
 install -m 0755 "$gateway_binary" "$stage/usr/bin/kernmux-gateway"
+cp -R "$web_assets/." "$stage/usr/share/kernmux/web/"
+find "$stage/usr/share/kernmux/web" -type d -exec chmod 0755 {} +
+find "$stage/usr/share/kernmux/web" -type f -exec chmod 0644 {} +
 install -m 0644 "$repo_root/packaging/systemd/kernmuxd.service" \
     "$stage/lib/systemd/system/kernmuxd.service"
 install -m 0644 "$repo_root/packaging/systemd/kernmux-gateway.service" \
@@ -57,8 +78,8 @@ Architecture: $package_arch
 Maintainer: Kernmux Contributors
 Depends: adduser, init-system-helpers, systemd
 Description: Multikernel Linux host management plane
- Kernmux provides a privileged local daemon, automation client, and local API
- gateway for managing resources and peer-kernel instances on Multikernel Linux.
+ Kernmux provides a privileged local daemon, automation client, and local web
+ console for managing resources and peer-kernel instances on Multikernel Linux.
 EOF
 
 cat >"$stage/DEBIAN/conffiles" <<'EOF'

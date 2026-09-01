@@ -80,23 +80,11 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
-On an Ubuntu build VM with `dpkg-deb` and the
+On an Ubuntu build environment with `dpkg-deb` and the
 `x86_64-unknown-linux-musl` target available:
 
 ```sh
 packaging/debian/build.sh
-packaging/debian/vm-smoke.sh \
-  dist/kernmux_0.1.0-1_amd64.deb \
-  dist/kernmux_0.1.0-2_amd64.deb
-```
-
-The opt-in acceptance harness mutates only a disposable Multikernel VM:
-
-```sh
-sudo KERNMUX_ACCEPT_MUTATION=1 \
-  packaging/acceptance/multikernel-vm.sh \
-  dist/kernmux_0.1.0-1_amd64.deb \
-  /boot/vmlinuz-7.0.0-mk2-kernmux-mk+
 ```
 
 Release artifacts must be assembled from a clean commit:
