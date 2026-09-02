@@ -23,6 +23,7 @@ futures-util = { version = "=0.3.34", features = ["sink"] }
 http-body-util = "=0.1.5"
 hyper = { version = "=1.11.1", features = ["http1", "server"] }
 hyper-util = { version = "=0.1.20", features = ["tokio"] }
+multer = "=3.1.0"
 jiff = "=0.2.35"
 kernmux-api = { path = "crates/kernmux-api" }
 kernmux-client = { path = "crates/kernmux-client" }

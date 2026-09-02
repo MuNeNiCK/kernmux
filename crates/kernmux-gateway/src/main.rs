@@ -55,6 +55,15 @@ fn config_from_environment() -> Result<GatewayConfig, Box<dyn std::error::Error>
     config.bind = bind;
     config.allow_non_loopback =
         std::env::var("KERNMUX_GATEWAY_ALLOW_NON_LOOPBACK").is_ok_and(|value| value == "1");
+    if let Some(path) = std::env::var_os("KERNMUX_GATEWAY_UPLOAD_DIR") {
+        config.upload_dir = PathBuf::from(path);
+    }
+    if let Ok(value) = std::env::var("KERNMUX_GATEWAY_MAX_UPLOAD_BYTES") {
+        config.max_upload_bytes = value.parse()?;
+    }
+    if let Ok(value) = std::env::var("KERNMUX_GATEWAY_MAX_UPLOADS") {
+        config.max_uploads = value.parse()?;
+    }
     if let Ok(origins) = std::env::var("KERNMUX_GATEWAY_ORIGINS") {
         config.allowed_origins = origins
             .split(',')

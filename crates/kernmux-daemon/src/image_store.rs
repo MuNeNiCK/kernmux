@@ -1,9 +1,9 @@
-//! Immutable content-addressed storage for managed boot artifacts.
+//! Immutable content-addressed storage for managed boot and OS images.
 
 use std::{
     fmt, fs,
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
@@ -12,7 +12,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
-use kernmux_api::v1::Generation;
+use kernmux_api::v1::{Generation, OsImageFormat};
 
 const RECORD_SCHEMA_VERSION: u32 = 1;
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
@@ -24,6 +24,7 @@ const MAX_RECORD_BYTES: u64 = 4096;
 pub enum ArtifactKind {
     Kernel,
     Initrd,
+    OsImage,
 }
 
 impl ArtifactKind {
@@ -31,6 +32,7 @@ impl ArtifactKind {
         match self {
             Self::Kernel => "kernel",
             Self::Initrd => "initrd",
+            Self::OsImage => "os-image",
         }
     }
 }
@@ -109,6 +111,18 @@ pub struct ArtifactRecord {
     pub kind: ArtifactKind,
     pub id: ArtifactId,
     pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub os_image: Option<OsImageRecord>,
+}
+
+/// Operator metadata and validated disk geometry for an OS image artifact.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct OsImageRecord {
+    pub label: String,
+    pub format: OsImageFormat,
+    pub virtual_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
 }
 
 /// Local immutable artifact store.
@@ -188,6 +202,34 @@ impl ImageCatalog {
             });
         }
         let artifact = self.store.import_path(kind, source, expected_id)?;
+        let after = self.refresh()?;
+        Ok((artifact, after))
+    }
+
+    /// Imports a validated generic OS disk image at the observed generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generation is stale or the image cannot be
+    /// validated and imported into immutable storage.
+    pub fn import_os_image(
+        &mut self,
+        expected_generation: Generation,
+        source: impl AsRef<Path>,
+        label: &str,
+        architecture: Option<&str>,
+        expected_id: Option<&ArtifactId>,
+    ) -> Result<(ArtifactRecord, ImageCatalogSnapshot), ImageCatalogError> {
+        let before = self.refresh()?;
+        if expected_generation != before.generation {
+            return Err(ImageCatalogError::StaleGeneration {
+                expected: expected_generation,
+                actual: before.generation,
+            });
+        }
+        let artifact = self
+            .store
+            .import_os_image(source, label, architecture, expected_id)?;
         let after = self.refresh()?;
         Ok((artifact, after))
     }
@@ -311,6 +353,65 @@ impl ImageStore {
             kind,
             id,
             bytes,
+            os_image: None,
+        };
+        self.publish_blob(&temporary, &record)?;
+        self.publish_record(&record)?;
+        Ok(record)
+    }
+
+    /// Imports a raw or qcow2 disk image after validating its content header.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when metadata or image contents are invalid, policy
+    /// limits are exceeded, or immutable storage cannot be updated safely.
+    pub fn import_os_image(
+        &self,
+        source: impl AsRef<Path>,
+        label: &str,
+        architecture: Option<&str>,
+        expected_id: Option<&ArtifactId>,
+    ) -> Result<ArtifactRecord, ImageStoreError> {
+        validate_label(label)?;
+        let architecture = architecture.map(validate_architecture).transpose()?;
+        let source = source.as_ref();
+        let mut input = open_no_follow(source)
+            .map_err(|source| ImageStoreError::io("open source OS image", source))?;
+        let metadata = input
+            .metadata()
+            .map_err(|source| ImageStoreError::io("inspect source OS image", source))?;
+        if !metadata.is_file() {
+            return Err(ImageStoreError::SourceNotRegular);
+        }
+        let (format, virtual_bytes) = inspect_disk_image(&mut input, metadata.len())?;
+        input
+            .seek(SeekFrom::Start(0))
+            .map_err(|source| ImageStoreError::io("rewind source OS image", source))?;
+
+        let mut temporary = NamedTempFile::new_in(self.temporary_directory())
+            .map_err(|source| ImageStoreError::io("create temporary blob", source))?;
+        let (id, bytes) = self.copy_and_hash(&mut input, temporary.as_file_mut())?;
+        if let Some(expected) = expected_id
+            && expected != &id
+        {
+            return Err(ImageStoreError::DigestMismatch {
+                expected: expected.clone(),
+                actual: id,
+            });
+        }
+        sync_read_only(temporary.as_file_mut(), "sync temporary blob")?;
+        let record = ArtifactRecord {
+            schema_version: RECORD_SCHEMA_VERSION,
+            kind: ArtifactKind::OsImage,
+            id,
+            bytes,
+            os_image: Some(OsImageRecord {
+                label: label.into(),
+                format,
+                virtual_bytes,
+                architecture,
+            }),
         };
         self.publish_blob(&temporary, &record)?;
         self.publish_record(&record)?;
@@ -347,7 +448,11 @@ impl ImageStore {
     /// Fails closed if any catalog entry or blob is malformed or corrupt.
     pub fn list(&self) -> Result<Vec<ArtifactRecord>, ImageStoreError> {
         let mut records = Vec::new();
-        for kind in [ArtifactKind::Kernel, ArtifactKind::Initrd] {
+        for kind in [
+            ArtifactKind::Kernel,
+            ArtifactKind::Initrd,
+            ArtifactKind::OsImage,
+        ] {
             let directory = self.record_directory(kind);
             for entry in fs::read_dir(&directory)
                 .map_err(|source| ImageStoreError::io("read artifact catalog", source))?
@@ -390,6 +495,7 @@ impl ImageStore {
             self.blob_directory(),
             self.record_directory(ArtifactKind::Kernel),
             self.record_directory(ArtifactKind::Initrd),
+            self.record_directory(ArtifactKind::OsImage),
             self.temporary_directory(),
         ] {
             fs::create_dir_all(&directory)
@@ -558,10 +664,107 @@ fn read_record(
         || record.kind != expected_kind
         || record.id != *expected_id
         || record.bytes == 0
+        || match record.kind {
+            ArtifactKind::Kernel | ArtifactKind::Initrd => record.os_image.is_some(),
+            ArtifactKind::OsImage => record.os_image.as_ref().is_none_or(|metadata| {
+                metadata.virtual_bytes == 0
+                    || metadata.format == OsImageFormat::Unknown
+                    || !valid_label(&metadata.label)
+                    || metadata
+                        .architecture
+                        .as_deref()
+                        .is_some_and(|value| !valid_architecture(value))
+            }),
+        }
     {
         return Err(corrupt("artifact metadata fields are inconsistent"));
     }
     Ok(record)
+}
+
+fn inspect_disk_image(
+    input: &mut File,
+    stored_bytes: u64,
+) -> Result<(OsImageFormat, u64), ImageStoreError> {
+    if stored_bytes == 0 {
+        return Err(ImageStoreError::EmptyArtifact);
+    }
+    let mut header = [0_u8; 520];
+    let header_bytes = usize::try_from(stored_bytes.min(header.len() as u64))
+        .expect("bounded header length fits usize");
+    input
+        .read_exact(&mut header[..header_bytes])
+        .map_err(|source| ImageStoreError::io("read OS image header", source))?;
+    if header_bytes < 4 || header[..4] != [0x51, 0x46, 0x49, 0xfb] {
+        let has_mbr = header_bytes >= 512 && header[510..512] == [0x55, 0xaa];
+        let has_gpt = header_bytes >= 520 && header[512..520] == *b"EFI PART";
+        if has_mbr || has_gpt {
+            return Ok((OsImageFormat::Raw, stored_bytes));
+        }
+        return Err(ImageStoreError::InvalidDiskImage(
+            "raw image has no MBR or GPT disk signature".into(),
+        ));
+    }
+    if header_bytes < 32 {
+        return Err(ImageStoreError::InvalidDiskImage(
+            "qcow2 header is truncated".into(),
+        ));
+    }
+    let version = u32::from_be_bytes(header[4..8].try_into().expect("fixed header field"));
+    if !(1..=3).contains(&version) {
+        return Err(ImageStoreError::InvalidDiskImage(format!(
+            "qcow2 version {version} is unsupported"
+        )));
+    }
+    let cluster_bits = u32::from_be_bytes(header[20..24].try_into().expect("fixed header field"));
+    if !(9..=21).contains(&cluster_bits) {
+        return Err(ImageStoreError::InvalidDiskImage(
+            "qcow2 cluster size is invalid".into(),
+        ));
+    }
+    let virtual_bytes = u64::from_be_bytes(header[24..32].try_into().expect("fixed header field"));
+    if virtual_bytes == 0 {
+        return Err(ImageStoreError::InvalidDiskImage(
+            "qcow2 virtual size is zero".into(),
+        ));
+    }
+    Ok((OsImageFormat::Qcow2, virtual_bytes))
+}
+
+fn validate_label(value: &str) -> Result<(), ImageStoreError> {
+    if valid_label(value) {
+        Ok(())
+    } else {
+        Err(ImageStoreError::InvalidOsImageMetadata(
+            "OS image label must be 1-128 printable characters without surrounding whitespace"
+                .into(),
+        ))
+    }
+}
+
+fn valid_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+fn validate_architecture(value: &str) -> Result<String, ImageStoreError> {
+    if valid_architecture(value) {
+        Ok(value.into())
+    } else {
+        Err(ImageStoreError::InvalidOsImageMetadata(
+            "OS image architecture is invalid".into(),
+        ))
+    }
+}
+
+fn valid_architecture(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
 fn require_read_only_file(metadata: &fs::Metadata, label: &str) -> Result<(), ImageStoreError> {
@@ -610,6 +813,8 @@ pub enum ImageStoreError {
     InvalidArtifactId(String),
     SourceNotRegular,
     EmptyArtifact,
+    InvalidDiskImage(String),
+    InvalidOsImageMetadata(String),
     TooLarge {
         limit: u64,
     },
@@ -641,6 +846,8 @@ impl fmt::Display for ImageStoreError {
             }
             Self::SourceNotRegular => formatter.write_str("artifact source is not a regular file"),
             Self::EmptyArtifact => formatter.write_str("artifact source is empty"),
+            Self::InvalidDiskImage(detail) => write!(formatter, "invalid OS disk image: {detail}"),
+            Self::InvalidOsImageMetadata(detail) => formatter.write_str(detail),
             Self::TooLarge { limit } => {
                 write!(formatter, "artifact exceeds the {limit}-byte size limit")
             }
@@ -1050,5 +1257,120 @@ mod tests {
             Err(ImageCatalogError::Store(ImageStoreError::Corrupt(_)))
         ));
         assert_eq!(catalog.generation, Generation(1));
+    }
+
+    fn qcow2_header(version: u32, cluster_bits: u32, virtual_bytes: u64) -> Vec<u8> {
+        let mut bytes = vec![0_u8; 72];
+        bytes[..4].copy_from_slice(&[0x51, 0x46, 0x49, 0xfb]);
+        bytes[4..8].copy_from_slice(&version.to_be_bytes());
+        bytes[20..24].copy_from_slice(&cluster_bits.to_be_bytes());
+        bytes[24..32].copy_from_slice(&virtual_bytes.to_be_bytes());
+        bytes
+    }
+
+    fn raw_disk_image() -> Vec<u8> {
+        let mut bytes = vec![0_u8; 1024];
+        bytes[510..512].copy_from_slice(&[0x55, 0xaa]);
+        bytes
+    }
+
+    #[test]
+    fn imports_raw_and_qcow2_os_images_from_content() {
+        let fixture = Fixture::new(4096);
+        let raw_bytes = raw_disk_image();
+        let raw = fixture.source("misleading.qcow2", &raw_bytes);
+        let raw = fixture
+            .store
+            .import_os_image(&raw, "Ubuntu raw", Some("x86_64"), None)
+            .unwrap();
+        assert_eq!(raw.kind, ArtifactKind::OsImage);
+        assert_eq!(raw.bytes, 1024);
+        assert_eq!(
+            raw.os_image,
+            Some(OsImageRecord {
+                label: "Ubuntu raw".into(),
+                format: OsImageFormat::Raw,
+                virtual_bytes: 1024,
+                architecture: Some("x86_64".into()),
+            })
+        );
+
+        let qcow = fixture.source("disk.bin", &qcow2_header(3, 16, 8 * 1024 * 1024));
+        let qcow = fixture
+            .store
+            .import_os_image(&qcow, "Generic cloud", None, None)
+            .unwrap();
+        assert_eq!(qcow.os_image.unwrap().format, OsImageFormat::Qcow2);
+        assert_eq!(
+            fixture
+                .store
+                .list()
+                .unwrap()
+                .iter()
+                .filter(|item| item.kind == ArtifactKind::OsImage)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_qcow2_and_invalid_os_metadata() {
+        let fixture = Fixture::new(4096);
+        let truncated = fixture.source("truncated", &[0x51, 0x46, 0x49, 0xfb]);
+        assert!(matches!(
+            fixture.store.import_os_image(truncated, "disk", None, None),
+            Err(ImageStoreError::InvalidDiskImage(_))
+        ));
+        let invalid = fixture.source("invalid", &qcow2_header(9, 16, 1024));
+        assert!(matches!(
+            fixture.store.import_os_image(invalid, "disk", None, None),
+            Err(ImageStoreError::InvalidDiskImage(_))
+        ));
+        let raw = fixture.source("raw", b"raw");
+        assert!(matches!(
+            fixture.store.import_os_image(&raw, "disk", None, None),
+            Err(ImageStoreError::InvalidDiskImage(_))
+        ));
+        assert!(matches!(
+            fixture.store.import_os_image(&raw, " disk ", None, None),
+            Err(ImageStoreError::InvalidOsImageMetadata(_))
+        ));
+        assert!(matches!(
+            fixture
+                .store
+                .import_os_image(&raw, "disk", Some("x86/64"), None),
+            Err(ImageStoreError::InvalidOsImageMetadata(_))
+        ));
+    }
+
+    #[test]
+    fn os_image_catalog_is_generation_guarded_and_metadata_is_unambiguous() {
+        let fixture = Fixture::new(4096);
+        let raw_bytes = raw_disk_image();
+        let source = fixture.source("disk", &raw_bytes);
+        let mut catalog = ImageCatalog::new(fixture.store.clone());
+        assert_eq!(catalog.refresh().unwrap().generation, Generation(1));
+        let (record, snapshot) = catalog
+            .import_os_image(Generation(1), &source, "Linux", Some("amd64"), None)
+            .unwrap();
+        assert_eq!(snapshot.generation, Generation(2));
+        let (_, unchanged) = catalog
+            .import_os_image(
+                Generation(2),
+                &source,
+                "Linux",
+                Some("amd64"),
+                Some(&record.id),
+            )
+            .unwrap();
+        assert_eq!(unchanged.generation, Generation(2));
+        assert!(matches!(
+            catalog.import_os_image(Generation(2), &source, "Different", Some("amd64"), None),
+            Err(ImageCatalogError::Store(ImageStoreError::Corrupt(_)))
+        ));
+        assert!(matches!(
+            catalog.import_os_image(Generation(1), &source, "Linux", Some("amd64"), None),
+            Err(ImageCatalogError::StaleGeneration { .. })
+        ));
     }
 }

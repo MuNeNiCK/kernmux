@@ -38,11 +38,43 @@ store. Their public IDs are canonical `sha256:` identifiers. Lifecycle requests
 can refer to those IDs with `instance load-image`; clients never need the
 daemon's private storage paths.
 
-Bundle construction, OCI transport, registry authentication, and download
-policy belong to an unprivileged acquisition layer outside `kernmuxd`. That
-layer may later preserve a bundle identity and OCI digest as metadata while
-Kernmux continues to own host-local verification, admission, cache integrity,
-and lifecycle references. Raw file import remains the v0.1 bootstrap path.
+The normal operator-owned OS artifact is a distribution-provided raw or QCOW2
+Cloud Image. The browser uploads it through the unprivileged gateway; the
+gateway streams it to private staging storage and asks `kernmuxd` to validate
+and import it into immutable, content-addressed storage. The browser never
+supplies or sees a host filesystem path. Kernmux does not provide a curated OS
+catalog.
+
+## Workload and root filesystem model
+
+From the operator's perspective, an imported OS image is the installation
+artifact used to create an instance. This preserves the useful standalone-host
+workflow—obtain an OS artifact, upload it, configure an isolated machine, and
+start it—without pretending that Multikernel provides virtual firmware or a
+virtual CD-ROM.
+
+```text
+distribution Cloud Image (raw/qcow2)
+    -> streamed upload and immutable import
+        -> Multikernel-compatible provisioning
+            -> peer-kernel instance
+```
+
+The provisioning stage must combine the imported operating-system contents
+with a release-compatible Multikernel kernel and bootstrap environment. Its
+exact implementation is a host concern, not an upload-time choice exposed to
+the operator. Until that stage exists, imported images are inventory only and
+the UI must not claim they are bootable.
+
+A custom kernel, initrd, command line, or direct physical device assignment
+remains an Advanced administrative path. It does not replace the normal
+operator workflow.
+
+Kernmux does not currently define an ESXi-style datastore, virtual disk, thin
+provisioning, or snapshot model. Those are not upstream Multikernel resources.
+If a future open Multikernel block backend exposes such primitives, Kernmux can
+add a capability-gated storage provider without changing the core instance
+model.
 
 ## Service hardening
 

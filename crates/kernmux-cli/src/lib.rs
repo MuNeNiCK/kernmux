@@ -11,8 +11,8 @@ use std::{
 };
 
 use kernmux_api::v1::{
-    CreateInstanceMutation, Generation, ImageKind, ImportImageMutation, InstanceId,
-    InstanceLifecycleMutation, LoadInstanceMutation, LoadManagedImageMutation,
+    CreateInstanceMutation, Generation, ImageKind, ImportImageMutation, ImportOsImageMutation,
+    InstanceId, InstanceLifecycleMutation, LoadInstanceMutation, LoadManagedImageMutation,
     ResourcePoolMutation, StopInstanceMutation, UpdateInstanceMutation,
 };
 use kernmux_client::{
@@ -277,9 +277,59 @@ fn parse_command(args: &[String]) -> Result<ApiRequest, CliError> {
         "pool" => parse_pool(tail),
         "instance" => parse_instance(tail),
         "image" => parse_image(tail),
+        "os-image" => parse_os_image(tail),
+        "storage" => match tail {
+            [action] if action == "list" => Ok(get("/1.0/storage-devices")),
+            _ => Err(CliError::usage("storage list is required")),
+        },
         "operation" => parse_operation(tail),
         "events" => parse_events(tail),
         _ => Err(CliError::usage(format!("unknown resource {resource}"))),
+    }
+}
+
+fn parse_os_image(args: &[String]) -> Result<ApiRequest, CliError> {
+    let Some((action, tail)) = args.split_first() else {
+        return Err(CliError::usage("os-image action is required"));
+    };
+    match action.as_str() {
+        "list" if tail.is_empty() => Ok(get("/1.0/os-images")),
+        "show" => {
+            let [id] = tail else {
+                return Err(CliError::usage("exactly one OS image ID is required"));
+            };
+            Ok(get(&format!("/1.0/os-images/{}", artifact_id(id)?)))
+        }
+        "import" => {
+            let options = Options::parse(
+                tail,
+                &[
+                    "generation",
+                    "source",
+                    "label",
+                    "architecture",
+                    "expected-id",
+                ],
+                &[],
+            )?;
+            options.no_positionals()?;
+            json_request(
+                "POST",
+                "/1.0/os-images",
+                &ImportOsImageMutation {
+                    expected_generation: generation(options.required("generation")?)?,
+                    source_path: options.required("source")?.to_owned(),
+                    label: options.required("label")?.to_owned(),
+                    architecture: options.value("architecture").map(str::to_owned),
+                    expected_id: options
+                        .value("expected-id")
+                        .map(artifact_id)
+                        .transpose()?
+                        .map(str::to_owned),
+                },
+            )
+        }
+        _ => Err(CliError::usage("unknown os-image action")),
     }
 }
 
@@ -847,6 +897,10 @@ Resources:
   image list
   image show KIND ID
   image import --generation N --kind KIND --source PATH [--expected-id ID]
+  os-image list
+  os-image show ID
+  os-image import --generation N --source PATH --label NAME [--architecture ARCH] [--expected-id ID]
+  storage list
   operation list
   operation show ID
   operation cancel ID
@@ -1017,6 +1071,65 @@ mod tests {
             ]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn parses_os_image_catalog_commands_without_boot_artifact_fields() {
+        let id = format!("sha256:{}", "b".repeat(64));
+
+        let list = parse_invocation(&strings(&["os-image", "list"])).unwrap();
+        assert_eq!(list.request.method, "GET");
+        assert_eq!(list.request.path, "/1.0/os-images");
+
+        let show = parse_invocation(&strings(&["os-image", "show", &id])).unwrap();
+        assert_eq!(show.request.method, "GET");
+        assert_eq!(show.request.path, format!("/1.0/os-images/{id}"));
+
+        let import = parse_invocation(&strings(&[
+            "os-image",
+            "import",
+            "--generation",
+            "4",
+            "--source",
+            "/var/lib/kernmux/incoming/ubuntu.img",
+            "--label",
+            "Ubuntu 24.04",
+            "--architecture",
+            "x86_64",
+            "--expected-id",
+            &id,
+        ]))
+        .unwrap();
+        assert_eq!(import.request.method, "POST");
+        assert_eq!(import.request.path, "/1.0/os-images");
+        let body: Value = serde_json::from_slice(&import.request.body).unwrap();
+        assert_eq!(body["expected_generation"], 4);
+        assert_eq!(body["source_path"], "/var/lib/kernmux/incoming/ubuntu.img");
+        assert_eq!(body["label"], "Ubuntu 24.04");
+        assert_eq!(body["architecture"], "x86_64");
+        assert_eq!(body["expected_id"], id);
+        assert!(body.get("kind").is_none());
+
+        assert!(parse_invocation(&strings(&["os-image", "show", "sha256:ABC"])).is_err());
+        assert!(
+            parse_invocation(&strings(&[
+                "os-image",
+                "import",
+                "--generation",
+                "4",
+                "--source",
+                "/tmp/os.img"
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parses_read_only_storage_inventory() {
+        let invocation = parse_invocation(&strings(&["storage", "list"])).unwrap();
+        assert_eq!(invocation.request.method, "GET");
+        assert_eq!(invocation.request.path, "/1.0/storage-devices");
+        assert!(parse_invocation(&strings(&["storage", "delete"])).is_err());
     }
 
     #[test]

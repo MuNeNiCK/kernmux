@@ -114,6 +114,7 @@ chown kernmux-web:kernmux-admin /etc/kernmux/gateway.token
 chmod 0400 /etc/kernmux/gateway.token
 install -d -o root -g kernmux -m 0750 /var/lib/kernmux
 install -d -o root -g kernmux -m 0750 /var/lib/kernmux/images
+install -d -o kernmux-web -g kernmux-admin -m 0700 /var/lib/kernmux/images/uploads
 if command -v deb-systemd-helper >/dev/null; then
     deb-systemd-helper unmask kernmuxd.service >/dev/null || true
     deb-systemd-helper enable kernmuxd.service >/dev/null || true

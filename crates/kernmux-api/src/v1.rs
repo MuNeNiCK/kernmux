@@ -388,6 +388,79 @@ pub struct ImageArtifact {
     pub bytes: u64,
 }
 
+/// On-disk representation accepted for a deployable operating-system image.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OsImageFormat {
+    Raw,
+    Qcow2,
+    #[serde(other)]
+    Unknown,
+}
+
+/// One immutable Linux disk image that can be deployed to dedicated storage.
+///
+/// The label and architecture are operator-supplied metadata. The content ID
+/// remains the authority for the stored bytes.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OsImage {
+    pub schema_version: u32,
+    pub id: String,
+    pub label: String,
+    pub format: OsImageFormat,
+    pub stored_bytes: u64,
+    pub virtual_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
+}
+
+/// Read-only inventory of disks considered for OS image deployment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StorageInventory {
+    pub generation: Generation,
+    pub devices: Vec<StorageDevice>,
+}
+
+/// One Linux block device and the evidence used to decide deployment safety.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StorageDevice {
+    pub name: String,
+    pub device_path: String,
+    pub major_minor: String,
+    pub size_bytes: u64,
+    pub whole_device: bool,
+    pub read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wwn: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pci_id: Option<String>,
+    pub eligible: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejection_reasons: Vec<StorageRejectionReason>,
+}
+
+/// Machine-readable reason that a block device cannot be overwritten.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageRejectionReason {
+    NotWholeDevice,
+    VirtualDevice,
+    ReadOnly,
+    ZeroSized,
+    Mounted,
+    HostRoot,
+    Swap,
+    HasHolders,
+    PeerAssigned,
+    IncompleteIdentity,
+    #[serde(other)]
+    Unknown,
+}
+
 /// Generation precondition supplied with a mutation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct MutationPrecondition {
@@ -458,6 +531,18 @@ pub struct ImportImageMutation {
     pub expected_id: Option<String>,
 }
 
+/// Imports one generic Linux disk image into immutable host storage.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ImportOsImageMutation {
+    pub expected_generation: Generation,
+    pub source_path: String,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub architecture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_id: Option<String>,
+}
+
 /// Applies a lifecycle transition to an existing instance.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct InstanceLifecycleMutation {
@@ -511,6 +596,7 @@ pub enum OperationKind {
     DeleteInstance,
     OpenConsole,
     ImportImage,
+    ImportOsImage,
     #[serde(other)]
     Unknown,
 }
@@ -546,6 +632,7 @@ pub enum ResourceKind {
     Device,
     Console,
     Image,
+    OsImage,
     #[serde(other)]
     Unknown,
 }
@@ -951,6 +1038,22 @@ mod tests {
             id: format!("sha256:{}", "b".repeat(64)),
             bytes: 4096,
         });
+        round_trip(&ImportOsImageMutation {
+            expected_generation: Generation(10),
+            source_path: "/var/lib/kernmux/import/ubuntu.img".into(),
+            label: "Ubuntu 24.04".into(),
+            architecture: Some("amd64".into()),
+            expected_id: Some(format!("sha256:{}", "e".repeat(64))),
+        });
+        round_trip(&OsImage {
+            schema_version: 1,
+            id: format!("sha256:{}", "e".repeat(64)),
+            label: "Ubuntu 24.04".into(),
+            format: OsImageFormat::Qcow2,
+            stored_bytes: 512 * 1024 * 1024,
+            virtual_bytes: 4 * 1024 * 1024 * 1024,
+            architecture: Some("amd64".into()),
+        });
     }
 
     #[test]
@@ -1083,6 +1186,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(allocation.memory_base, None);
+    }
+
+    #[test]
+    fn storage_inventory_round_trips_machine_readable_rejections() {
+        round_trip(&StorageInventory {
+            generation: Generation(12),
+            devices: vec![StorageDevice {
+                name: "nvme0n1".into(),
+                device_path: "/dev/nvme0n1".into(),
+                major_minor: "259:0".into(),
+                size_bytes: 1_000_000_000,
+                whole_device: true,
+                read_only: false,
+                serial: Some("disk-1".into()),
+                wwn: None,
+                transport: Some("nvme".into()),
+                pci_id: Some("0000:03:00.0".into()),
+                eligible: false,
+                rejection_reasons: vec![StorageRejectionReason::HostRoot],
+            }],
+        });
     }
 
     #[test]

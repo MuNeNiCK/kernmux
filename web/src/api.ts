@@ -1,4 +1,4 @@
-import type { AcceptedEnvelope, EventPage, HostSnapshot, ImageArtifact, Instance, Operation, ResultEnvelope } from "./model"
+import type { AcceptedEnvelope, EventPage, HostSnapshot, ImageArtifact, Instance, Operation, OsImage, ResultEnvelope } from "./model"
 
 export class ApiError extends Error {
   constructor(
@@ -49,6 +49,7 @@ export class KernmuxApi {
   host(): Promise<ResultEnvelope<HostSnapshot>> { return this.request("") }
   instances(): Promise<ResultEnvelope<Instance[]>> { return this.request("/instances") }
   images(): Promise<ResultEnvelope<ImageArtifact[]>> { return this.request("/images") }
+  osImages(): Promise<ResultEnvelope<OsImage[]>> { return this.request("/os-images") }
   operations(): Promise<ResultEnvelope<Operation[]>> { return this.request("/operations") }
   events(): Promise<ResultEnvelope<EventPage>> { return this.request("/events") }
   operation(id: string): Promise<ResultEnvelope<Operation>> { return this.request(`/operations/${encodeURIComponent(id)}`) }
@@ -78,6 +79,26 @@ export class KernmuxApi {
 
   importImage(input: { expected_generation: number; kind: "kernel" | "initrd"; source_path: string; expected_id?: string }) {
     return this.accepted("/images", "POST", input)
+  }
+
+  async uploadOsImage(input: { expected_generation: number; file: File; label: string; architecture?: string; expected_sha256?: string }): Promise<AcceptedEnvelope> {
+    const body = new FormData()
+    body.append("label", input.label)
+    body.append("expected_generation", String(input.expected_generation))
+    if (input.architecture) body.append("architecture", input.architecture)
+    if (input.expected_sha256) body.append("expected_sha256", input.expected_sha256)
+    body.append("file", input.file, input.file.name)
+    const response = await fetch("/api/1.0/os-images/upload", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${this.bearer}` },
+      body,
+    })
+    const value: unknown = await response.json().catch(() => null)
+    if (!response.ok) {
+      const detail = errorMessage(value)
+      throw new ApiError(response.status, detail.code, detail.message)
+    }
+    return value as AcceptedEnvelope
   }
 
   private accepted(path: string, method: string, body: object): Promise<AcceptedEnvelope> {

@@ -68,6 +68,16 @@ export interface ImageArtifact {
   bytes: number
 }
 
+export interface OsImage {
+  schema_version: number
+  id: string
+  label: string
+  format: "raw" | "qcow2" | "unknown"
+  stored_bytes: number
+  virtual_bytes: number
+  architecture?: string
+}
+
 export interface HostSnapshot {
   generation: number
   health: "healthy" | "indeterminate" | "unknown"

@@ -12,9 +12,10 @@ use std::{
 
 use kernmux_api::v1::{
     ApiError, CreateInstanceMutation, EventPage, Generation, HostCompatibilityReport, HostSnapshot,
-    ImageArtifact, ImportImageMutation, Instance, InstanceId, InstanceLifecycleMutation,
-    LoadInstanceMutation, LoadManagedImageMutation, Operation, OperationId, OperationState,
-    ResourcePool, ResourcePoolMutation, Response, StopInstanceMutation, UpdateInstanceMutation,
+    ImageArtifact, ImportImageMutation, ImportOsImageMutation, Instance, InstanceId,
+    InstanceLifecycleMutation, LoadInstanceMutation, LoadManagedImageMutation, Operation,
+    OperationId, OperationState, OsImage, ResourcePool, ResourcePoolMutation, Response,
+    StopInstanceMutation, StorageInventory, UpdateInstanceMutation,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -256,6 +257,21 @@ impl<T: Transport> Client<T> {
         self.call(&Request::get("/1.0/images"))
     }
 
+    /// Reads deployable generic Linux disk images.
+    pub fn os_images(&self) -> Result<Outcome<Vec<OsImage>>, ClientError> {
+        self.call(&Request::get("/1.0/os-images"))
+    }
+
+    /// Reads one deployable generic Linux disk image.
+    pub fn os_image(&self, id: &str) -> Result<Outcome<OsImage>, ClientError> {
+        self.call(&Request::get(format!("/1.0/os-images/{id}")))
+    }
+
+    /// Reads deployment-safe block-device inventory.
+    pub fn storage_devices(&self) -> Result<Outcome<StorageInventory>, ClientError> {
+        self.call(&Request::get("/1.0/storage-devices"))
+    }
+
     /// Reads recent asynchronous operations.
     pub fn operations(&self) -> Result<Outcome<Vec<Operation>>, ClientError> {
         self.call(&Request::get("/1.0/operations"))
@@ -277,6 +293,14 @@ impl<T: Transport> Client<T> {
         mutation: &ResourcePoolMutation,
     ) -> Result<Outcome<ResourcePool>, ClientError> {
         self.call(&Request::json("PUT", "/1.0/resource-pool", mutation)?)
+    }
+
+    /// Imports one generic Linux disk image from an admitted host path.
+    pub fn import_os_image(
+        &self,
+        mutation: &ImportOsImageMutation,
+    ) -> Result<Outcome<OsImage>, ClientError> {
+        self.call(&Request::json("POST", "/1.0/os-images", mutation)?)
     }
 
     /// Creates one peer-kernel instance.

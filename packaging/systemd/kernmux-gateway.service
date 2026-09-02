@@ -13,6 +13,7 @@ User=kernmux-web
 Group=kernmux-admin
 SupplementaryGroups=kernmux
 UMask=0077
+Environment=KERNMUX_GATEWAY_UPLOAD_DIR=/var/lib/kernmux/images/uploads
 Restart=on-failure
 RestartSec=2s
 TimeoutStopSec=15s
@@ -29,6 +30,7 @@ ProtectHostname=yes
 ProtectKernelLogs=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
+ReadWritePaths=/var/lib/kernmux/images/uploads
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 RestrictNamespaces=yes
 RestrictRealtime=yes

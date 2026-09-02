@@ -13,4 +13,5 @@ pub mod resource_pool;
 pub mod scheduler;
 pub mod security;
 pub mod service;
+pub mod storage_inventory;
 pub mod transport;

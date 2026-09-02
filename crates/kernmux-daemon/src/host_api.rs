@@ -9,10 +9,10 @@ use std::{
 use hyper::{Method, StatusCode};
 use kernmux_api::v1::{
     ApiError, CreateInstanceMutation, ErrorCode, EventPage, EventSequence, Generation,
-    HostCompatibilityReport, ImageArtifact, ImageKind, ImportImageMutation, InstanceId,
-    InstanceLifecycleMutation, LoadInstanceMutation, LoadManagedImageMutation, Operation,
-    OperationId, OperationKind, ResourceKind, ResourcePoolMutation, ResourceReference, Response,
-    StopInstanceMutation, UpdateInstanceMutation,
+    HostCompatibilityReport, ImageArtifact, ImageKind, ImportImageMutation, ImportOsImageMutation,
+    InstanceId, InstanceLifecycleMutation, LoadInstanceMutation, LoadManagedImageMutation,
+    Operation, OperationId, OperationKind, OsImage, ResourceKind, ResourcePoolMutation,
+    ResourceReference, Response, StopInstanceMutation, UpdateInstanceMutation,
 };
 
 use crate::{
@@ -37,6 +37,7 @@ use crate::{
         lifecycle_task_result, resource_pool_task_result,
     },
     security::{AuditAction, LimitKind, PeerIdentity, RequestClass, ServiceLimiter, ServiceLimits},
+    storage_inventory::LinuxStorageInventory,
     transport::{LocalApi, LocalRequest, LocalResponse, LocalUpgrade, RouteSecurity},
 };
 
@@ -395,6 +396,8 @@ where
             (&Method::GET, "/1.0/resource-pool") => self.resource_pool(),
             (&Method::GET, "/1.0/instances") => self.instances(),
             (&Method::GET, "/1.0/images") => self.images(),
+            (&Method::GET, "/1.0/os-images") => self.os_images(),
+            (&Method::GET, "/1.0/storage-devices") => self.storage_devices(),
             (&Method::GET, "/1.0/operations") => self.operations(),
             (&Method::GET, "/1.0/events") => self.events(request.uri.query()),
             (&Method::PUT, "/1.0/resource-pool") => {
@@ -422,6 +425,10 @@ where
                 let mutation = decode::<ImportImageMutation>(&request.body)?;
                 self.submit_image_import(mutation, peer, audit_id.as_deref())
             }
+            (&Method::POST, "/1.0/os-images") => {
+                let mutation = decode::<ImportOsImageMutation>(&request.body)?;
+                self.submit_os_image_import(mutation, peer, audit_id.as_deref())
+            }
             _ => self.dispatch_resource(request, peer),
         }
     }
@@ -442,6 +449,12 @@ where
         if let Some((kind, id)) = image_resource(request.uri.path()) {
             return match request.method {
                 Method::GET => self.image(kind, &id),
+                _ => Err(not_found()),
+            };
+        }
+        if let Some(id) = os_image_resource(request.uri.path()) {
+            return match request.method {
+                Method::GET => self.os_image(&id),
                 _ => Err(not_found()),
             };
         }
@@ -661,6 +674,7 @@ where
             snapshot
                 .artifacts
                 .iter()
+                .filter(|artifact| artifact.kind != ArtifactKind::OsImage)
                 .map(image_artifact)
                 .collect::<Vec<_>>(),
         )
@@ -679,6 +693,57 @@ where
             .find(|artifact| artifact.kind == kind && &artifact.id == id)
             .ok_or_else(not_found)?;
         result_response(snapshot.generation, image_artifact(artifact))
+    }
+
+    fn os_images(&self) -> Result<LocalResponse, ApiError> {
+        let snapshot = self
+            .image_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refresh()
+            .map_err(image_catalog_api_error)?;
+        result_response(
+            snapshot.generation,
+            snapshot
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.kind == ArtifactKind::OsImage)
+                .map(os_image)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
+    }
+
+    fn os_image(&self, id: &ArtifactId) -> Result<LocalResponse, ApiError> {
+        let snapshot = self
+            .image_catalog
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refresh()
+            .map_err(image_catalog_api_error)?;
+        let artifact = snapshot
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.kind == ArtifactKind::OsImage && &artifact.id == id)
+            .ok_or_else(not_found)?;
+        result_response(snapshot.generation, os_image(artifact)?)
+    }
+
+    fn storage_devices(&self) -> Result<LocalResponse, ApiError> {
+        let snapshot = self
+            .inventory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .refresh_snapshot()
+            .map_err(|_| backend("host inventory is unavailable"))?;
+        let peer_pci_ids = snapshot
+            .instances
+            .iter()
+            .flat_map(|instance| instance.resources.device_ids.iter().cloned())
+            .collect();
+        let inventory = LinuxStorageInventory::running_host()
+            .observe(&peer_pci_ids)
+            .map_err(|_| backend("storage inventory is unavailable"))?;
+        result_response(inventory.generation, inventory)
     }
 
     fn operations(&self) -> Result<LocalResponse, ApiError> {
@@ -855,6 +920,64 @@ where
         accepted_response(operation)
     }
 
+    fn submit_os_image_import(
+        &self,
+        mutation: ImportOsImageMutation,
+        peer: &PeerIdentity,
+        audit_id: Option<&str>,
+    ) -> Result<LocalResponse, ApiError> {
+        let source = self.image_policy.resolve(&mutation.source_path)?;
+        let expected_id = mutation
+            .expected_id
+            .map(ArtifactId::parse)
+            .transpose()
+            .map_err(|error| image_store_api_error(&error))?;
+        let permit = self.limiter.acquire(LimitKind::Mutation)?;
+        let catalog = Arc::clone(&self.image_catalog);
+        let expected_generation = mutation.expected_generation;
+        let resource_id = expected_id
+            .as_ref()
+            .map_or_else(|| "catalog".into(), ToString::to_string);
+        let operation = self
+            .scheduler
+            .submit(
+                new_operation(
+                    OperationKind::ImportOsImage,
+                    expected_generation,
+                    ResourceReference {
+                        kind: ResourceKind::OsImage,
+                        id: resource_id,
+                    },
+                    peer,
+                    audit_id,
+                ),
+                move |cancellation| {
+                    let _permit = permit;
+                    if cancellation.is_cancelled() {
+                        return OperationTaskResult::cancelled(None);
+                    }
+                    let mut catalog = catalog
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    match catalog.import_os_image(
+                        expected_generation,
+                        source,
+                        &mutation.label,
+                        mutation.architecture.as_deref(),
+                        expected_id.as_ref(),
+                    ) {
+                        Ok((_, snapshot)) => OperationTaskResult::succeeded(snapshot.generation),
+                        Err(error) => {
+                            let (api_error, generation) = image_catalog_task_error(error);
+                            OperationTaskResult::failed(api_error, generation)
+                        }
+                    }
+                },
+            )
+            .map_err(schedule_error)?;
+        accepted_response(operation)
+    }
+
     fn submit_managed_load(
         &self,
         request: ManagedLoadRequest,
@@ -956,10 +1079,17 @@ fn route_for(method: &Method, path: &str) -> Option<RouteSecurity> {
     match (method, path) {
         (
             &Method::GET,
-            "/1.0" | "/1.0/compatibility" | "/1.0/resource-pool" | "/1.0/instances" | "/1.0/images"
-            | "/1.0/operations" | "/1.0/events",
+            "/1.0"
+            | "/1.0/compatibility"
+            | "/1.0/resource-pool"
+            | "/1.0/instances"
+            | "/1.0/images"
+            | "/1.0/os-images"
+            | "/1.0/storage-devices"
+            | "/1.0/operations"
+            | "/1.0/events",
         ) => Some(read),
-        (&Method::POST, "/1.0/images") => Some(RouteSecurity {
+        (&Method::POST, "/1.0/images" | "/1.0/os-images") => Some(RouteSecurity {
             class: RequestClass::Administration,
             audit_action: AuditAction::ManageImages,
         }),
@@ -977,6 +1107,10 @@ fn route_for(method: &Method, path: &str) -> Option<RouteSecurity> {
             _ => None,
         },
         _ if image_resource(path).is_some() => match *method {
+            Method::GET => Some(read),
+            _ => None,
+        },
+        _ if os_image_resource(path).is_some() => match *method {
             Method::GET => Some(read),
             _ => None,
         },
@@ -1016,6 +1150,13 @@ fn image_resource(path: &str) -> Option<(ArtifactKind, ArtifactId)> {
     Some((kind, id))
 }
 
+fn os_image_resource(path: &str) -> Option<ArtifactId> {
+    let id = path.strip_prefix("/1.0/os-images/")?;
+    (!id.is_empty() && !id.contains('/'))
+        .then(|| ArtifactId::parse(id.to_owned()).ok())
+        .flatten()
+}
+
 fn artifact_kind(kind: ImageKind) -> Result<ArtifactKind, ApiError> {
     match kind {
         ImageKind::Kernel => Ok(ArtifactKind::Kernel),
@@ -1030,10 +1171,27 @@ fn image_artifact(record: &ArtifactRecord) -> ImageArtifact {
         kind: match record.kind {
             ArtifactKind::Kernel => ImageKind::Kernel,
             ArtifactKind::Initrd => ImageKind::Initrd,
+            ArtifactKind::OsImage => ImageKind::Unknown,
         },
         id: record.id.to_string(),
         bytes: record.bytes,
     }
+}
+
+fn os_image(record: &ArtifactRecord) -> Result<OsImage, ApiError> {
+    let metadata = record
+        .os_image
+        .as_ref()
+        .ok_or_else(|| backend("OS image catalog is inconsistent"))?;
+    Ok(OsImage {
+        schema_version: record.schema_version,
+        id: record.id.to_string(),
+        label: metadata.label.clone(),
+        format: metadata.format,
+        stored_bytes: record.bytes,
+        virtual_bytes: metadata.virtual_bytes,
+        architecture: metadata.architecture.clone(),
+    })
 }
 
 fn image_catalog_api_error(error: ImageCatalogError) -> ApiError {
@@ -1069,6 +1227,8 @@ fn image_store_api_error(error: &ImageStoreError) -> ApiError {
         | ImageStoreError::InvalidArtifactId(_)
         | ImageStoreError::SourceNotRegular
         | ImageStoreError::EmptyArtifact
+        | ImageStoreError::InvalidDiskImage(_)
+        | ImageStoreError::InvalidOsImageMetadata(_)
         | ImageStoreError::TooLarge { .. }
         | ImageStoreError::DigestMismatch { .. } => {
             invalid("image artifact is invalid or exceeds policy")
@@ -1304,6 +1464,20 @@ mod tests {
             route_for(&Method::POST, "/1.0/images").unwrap().class,
             RequestClass::Administration
         );
+        assert_eq!(
+            route_for(&Method::GET, "/1.0/os-images").unwrap().class,
+            RequestClass::ReadOnly
+        );
+        assert_eq!(
+            route_for(&Method::GET, "/1.0/storage-devices")
+                .unwrap()
+                .class,
+            RequestClass::ReadOnly
+        );
+        assert_eq!(
+            route_for(&Method::POST, "/1.0/os-images").unwrap().class,
+            RequestClass::Administration
+        );
         let id = format!("sha256:{}", "a".repeat(64));
         assert_eq!(
             route_for(&Method::GET, &format!("/1.0/images/kernel/{id}"))
@@ -1312,6 +1486,14 @@ mod tests {
             RequestClass::ReadOnly
         );
         assert!(route_for(&Method::GET, "/1.0/images/kernel/not-a-digest").is_none());
+        assert_eq!(
+            route_for(&Method::GET, &format!("/1.0/os-images/{id}"))
+                .unwrap()
+                .class,
+            RequestClass::ReadOnly
+        );
+        assert!(route_for(&Method::GET, "/1.0/os-images/sha256:ABC").is_none());
+        assert!(route_for(&Method::POST, &format!("/1.0/os-images/{id}")).is_none());
         assert!(route_for(&Method::POST, "/1.0/instances/1/unknown").is_none());
         assert!(route_for(&Method::GET, "/2.0").is_none());
         assert!(route_for(&Method::POST, "/1.0/instances/1/start/extra").is_none());
@@ -1329,6 +1511,15 @@ mod tests {
         assert!(image_resource(&format!("/1.0/images/unknown/{id}")).is_none());
         assert!(image_resource(&format!("/1.0/images/kernel/{id}/extra")).is_none());
         assert!(image_resource("/1.0/images/kernel/sha256:ABC").is_none());
+
+        assert_eq!(
+            os_image_resource(&format!("/1.0/os-images/{id}"))
+                .unwrap()
+                .to_string(),
+            id
+        );
+        assert!(os_image_resource("/1.0/os-images/sha256:ABC").is_none());
+        assert!(os_image_resource(&format!("/1.0/os-images/{id}/extra")).is_none());
     }
 
     #[test]

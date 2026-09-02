@@ -25,10 +25,19 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use kernmux_client::{Request, Transport};
-use tokio::{net::TcpListener, sync::Semaphore};
+use multer::{Constraints, Multipart, SizeLimit};
+use serde::Serialize;
+use tokio::{
+    io::AsyncWriteExt,
+    net::TcpListener,
+    sync::{OwnedSemaphorePermit, Semaphore},
+};
 
 const DEFAULT_MAX_REQUEST_BYTES: usize = 1024 * 1024;
 const DEFAULT_MAX_STATIC_BYTES: u64 = 32 * 1024 * 1024;
+const DEFAULT_MAX_UPLOAD_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const UPLOAD_METADATA_BYTES: u64 = 1024;
+const STALE_UPLOAD_AGE: std::time::Duration = std::time::Duration::from_hours(24);
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone)]
@@ -41,6 +50,9 @@ pub struct GatewayConfig {
     pub daemon_socket: PathBuf,
     pub max_request_bytes: usize,
     pub max_connections: usize,
+    pub upload_dir: PathBuf,
+    pub max_upload_bytes: u64,
+    pub max_uploads: usize,
 }
 
 impl std::fmt::Debug for GatewayConfig {
@@ -55,6 +67,9 @@ impl std::fmt::Debug for GatewayConfig {
             .field("daemon_socket", &self.daemon_socket)
             .field("max_request_bytes", &self.max_request_bytes)
             .field("max_connections", &self.max_connections)
+            .field("upload_dir", &self.upload_dir)
+            .field("max_upload_bytes", &self.max_upload_bytes)
+            .field("max_uploads", &self.max_uploads)
             .finish()
     }
 }
@@ -74,6 +89,9 @@ impl GatewayConfig {
             daemon_socket: PathBuf::from("/run/kernmux/kernmuxd.sock"),
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             max_connections: 64,
+            upload_dir: PathBuf::from("/var/lib/kernmux/images/uploads"),
+            max_upload_bytes: DEFAULT_MAX_UPLOAD_BYTES,
+            max_uploads: 2,
         }
     }
 
@@ -101,7 +119,12 @@ impl GatewayConfig {
         {
             return Err(ConfigError("allowed origins must be explicit HTTP origins"));
         }
-        if self.max_request_bytes == 0 || self.max_connections == 0 {
+        if self.max_request_bytes == 0
+            || self.max_connections == 0
+            || self.max_upload_bytes == 0
+            || self.max_uploads == 0
+            || !self.upload_dir.is_absolute()
+        {
             return Err(ConfigError("gateway limits must be nonzero"));
         }
         Ok(())
@@ -110,6 +133,17 @@ impl GatewayConfig {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConfigError(pub &'static str);
+
+#[derive(Serialize)]
+struct UploadImportMutation {
+    expected_generation: u64,
+    source_path: String,
+    label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    architecture: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_id: Option<String>,
+}
 
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -124,6 +158,7 @@ pub struct Gateway<T> {
     config: Arc<GatewayConfig>,
     transport: T,
     permits: Arc<Semaphore>,
+    upload_permits: Arc<Semaphore>,
 }
 
 impl<T: std::fmt::Debug> std::fmt::Debug for Gateway<T> {
@@ -145,10 +180,12 @@ where
     pub fn new(config: GatewayConfig, transport: T) -> Result<Self, ConfigError> {
         config.validate()?;
         let permits = Arc::new(Semaphore::new(config.max_connections));
+        let upload_permits = Arc::new(Semaphore::new(config.max_uploads));
         Ok(Self {
             config: Arc::new(config),
             transport,
             permits,
+            upload_permits,
         })
     }
 
@@ -159,6 +196,7 @@ where
         listener: TcpListener,
         shutdown: impl Future<Output = ()>,
     ) -> Result<(), std::io::Error> {
+        self.cleanup_stale_uploads().await;
         tokio::pin!(shutdown);
         loop {
             tokio::select! {
@@ -176,6 +214,30 @@ where
                             .await;
                     });
                 }
+            }
+        }
+    }
+
+    async fn cleanup_stale_uploads(&self) {
+        let Ok(mut entries) = tokio::fs::read_dir(&self.config.upload_dir).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            let recognized = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| matches!(value, "part" | "ready"));
+            let stale = entry
+                .metadata()
+                .await
+                .ok()
+                .filter(std::fs::Metadata::is_file)
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= STALE_UPLOAD_AGE);
+            if recognized && stale {
+                let _ = tokio::fs::remove_file(path).await;
             }
         }
     }
@@ -251,6 +313,15 @@ where
         if request.headers().contains_key(hyper::header::UPGRADE) {
             return error_response(StatusCode::NOT_IMPLEMENTED, "console_unavailable");
         }
+        if request.uri().path() == "/api/1.0/os-images/upload" {
+            if request.method() != Method::POST {
+                return error_response(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed");
+            }
+            let Ok(upload_permit) = self.upload_permits.clone().try_acquire_owned() else {
+                return error_response(StatusCode::SERVICE_UNAVAILABLE, "upload_busy");
+            };
+            return self.handle_os_image_upload(request, upload_permit).await;
+        }
         let Some(path) = daemon_path(request.method(), request.uri()) else {
             return error_response(StatusCode::NOT_FOUND, "route_not_found");
         };
@@ -304,6 +375,240 @@ where
             Ok(Err(_)) => error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable"),
             Err(_) => error_response(StatusCode::BAD_GATEWAY, "gateway_failure"),
         }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn handle_os_image_upload(
+        &self,
+        request: HttpRequest<Incoming>,
+        upload_permit: OwnedSemaphorePermit,
+    ) -> HttpResponse<Full<Bytes>> {
+        let Some(content_length) = request
+            .headers()
+            .get(hyper::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            return error_response(StatusCode::LENGTH_REQUIRED, "content_length_required");
+        };
+        let multipart_limit = self.config.max_upload_bytes.saturating_add(64 * 1024);
+        if content_length == 0 || content_length > multipart_limit {
+            return error_response(StatusCode::PAYLOAD_TOO_LARGE, "upload_too_large");
+        }
+        let Some(boundary) = request
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| multer::parse_boundary(value).ok())
+        else {
+            return error_response(StatusCode::UNSUPPORTED_MEDIA_TYPE, "multipart_required");
+        };
+        if tokio::fs::create_dir_all(&self.config.upload_dir)
+            .await
+            .is_err()
+        {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "upload_storage_unavailable",
+            );
+        }
+        let constraints = Constraints::new()
+            .allowed_fields(vec![
+                "file",
+                "label",
+                "architecture",
+                "expected_generation",
+                "expected_sha256",
+            ])
+            .size_limit(
+                SizeLimit::new()
+                    .whole_stream(multipart_limit)
+                    .per_field(self.config.max_upload_bytes)
+                    .for_field("label", UPLOAD_METADATA_BYTES)
+                    .for_field("architecture", UPLOAD_METADATA_BYTES)
+                    .for_field("expected_generation", UPLOAD_METADATA_BYTES)
+                    .for_field("expected_sha256", UPLOAD_METADATA_BYTES),
+            );
+        let mut multipart = Multipart::with_constraints(
+            request.into_body().into_data_stream(),
+            boundary,
+            constraints,
+        );
+        let upload_id = generated_request_id();
+        let part_path = self.config.upload_dir.join(format!("{upload_id}.part"));
+        let ready_path = self.config.upload_dir.join(format!("{upload_id}.ready"));
+        let mut label = None;
+        let mut architecture = None;
+        let mut expected_generation = None;
+        let mut expected_id = None;
+        let mut uploaded = false;
+
+        let parse_result: Result<(), &'static str> = async {
+            while let Some(mut field) = multipart
+                .next_field()
+                .await
+                .map_err(|_| "invalid_multipart")?
+            {
+                match field.name() {
+                    Some("file") if !uploaded => {
+                        let mut output = tokio::fs::OpenOptions::new()
+                            .create_new(true)
+                            .write(true)
+                            .open(&part_path)
+                            .await
+                            .map_err(|_| "upload_storage_unavailable")?;
+                        let mut written = 0_u64;
+                        while let Some(chunk) =
+                            field.chunk().await.map_err(|_| "invalid_multipart")?
+                        {
+                            written = written
+                                .checked_add(chunk.len() as u64)
+                                .ok_or("upload_too_large")?;
+                            if written > self.config.max_upload_bytes {
+                                return Err("upload_too_large");
+                            }
+                            output
+                                .write_all(&chunk)
+                                .await
+                                .map_err(|_| "upload_storage_unavailable")?;
+                        }
+                        if written == 0 {
+                            return Err("empty_upload");
+                        }
+                        output
+                            .sync_all()
+                            .await
+                            .map_err(|_| "upload_storage_unavailable")?;
+                        uploaded = true;
+                    }
+                    Some("label") if label.is_none() => {
+                        label = Some(field.text().await.map_err(|_| "invalid_multipart")?);
+                    }
+                    Some("architecture") if architecture.is_none() => {
+                        architecture = Some(field.text().await.map_err(|_| "invalid_multipart")?);
+                    }
+                    Some("expected_generation") if expected_generation.is_none() => {
+                        expected_generation =
+                            Some(field.text().await.map_err(|_| "invalid_multipart")?);
+                    }
+                    Some("expected_sha256") if expected_id.is_none() => {
+                        expected_id = Some(field.text().await.map_err(|_| "invalid_multipart")?);
+                    }
+                    Some(_) => return Err("duplicate_field"),
+                    None => return Err("invalid_multipart"),
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(code) = parse_result {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return error_response(
+                if code == "upload_too_large" {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
+                code,
+            );
+        }
+        let Some(label) = label.filter(|value| !value.is_empty()) else {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return error_response(StatusCode::BAD_REQUEST, "label_required");
+        };
+        let Some(expected_generation) =
+            expected_generation.and_then(|value| value.parse::<u64>().ok())
+        else {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return error_response(StatusCode::BAD_REQUEST, "expected_generation_required");
+        };
+        if !uploaded || tokio::fs::rename(&part_path, &ready_path).await.is_err() {
+            let _ = tokio::fs::remove_file(&part_path).await;
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "upload_storage_unavailable",
+            );
+        }
+        let mutation = UploadImportMutation {
+            expected_generation,
+            source_path: ready_path.to_string_lossy().into_owned(),
+            label,
+            architecture: architecture.filter(|value| !value.is_empty()),
+            expected_id: expected_id.filter(|value| !value.is_empty()).map(|value| {
+                if value.starts_with("sha256:") {
+                    value
+                } else {
+                    format!("sha256:{value}")
+                }
+            }),
+        };
+        let Ok(body) = serde_json::to_vec(&mutation) else {
+            let _ = tokio::fs::remove_file(&ready_path).await;
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, "gateway_failure");
+        };
+        let transport = self.transport.clone();
+        let request_id = upload_id;
+        let forwarded = Request {
+            method: "POST",
+            path: "/1.0/os-images".into(),
+            body,
+        };
+        let result =
+            tokio::task::spawn_blocking(move || transport.execute(&request_id, &forwarded)).await;
+        drop(upload_permit);
+        match result {
+            Ok(Ok(response)) => {
+                if response.status == 202 {
+                    self.cleanup_after_operation(ready_path, &response.value);
+                } else {
+                    let _ = tokio::fs::remove_file(&ready_path).await;
+                }
+                json_bytes_response(response.status, &response.value)
+            }
+            Ok(Err(_)) => {
+                let _ = tokio::fs::remove_file(&ready_path).await;
+                error_response(StatusCode::BAD_GATEWAY, "daemon_unavailable")
+            }
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&ready_path).await;
+                error_response(StatusCode::BAD_GATEWAY, "gateway_failure")
+            }
+        }
+    }
+
+    fn cleanup_after_operation(&self, path: PathBuf, response: &serde_json::Value) {
+        let Some(operation_id) = response
+            .get("operation")
+            .and_then(|value| value.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let transport = self.transport.clone();
+        tokio::spawn(async move {
+            for attempt in 0..120 {
+                if attempt > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                let transport = transport.clone();
+                let operation_path = format!("/1.0/operations/{operation_id}");
+                let request_id = generated_request_id();
+                let result = tokio::task::spawn_blocking(move || {
+                    transport.execute(&request_id, &Request::get(operation_path))
+                })
+                .await;
+                let terminal = matches!(result, Ok(Ok(ref response)) if response.value
+                    .get("data")
+                    .and_then(|value| value.get("state"))
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|state| matches!(state, "succeeded" | "failed" | "cancelled" | "indeterminate" | "unknown")));
+                if terminal {
+                    let _ = tokio::fs::remove_file(&path).await;
+                    break;
+                }
+            }
+        });
     }
 
     async fn handle_static(&self, request: HttpRequest<Incoming>) -> HttpResponse<Full<Bytes>> {
@@ -390,7 +695,11 @@ fn daemon_path(method: &Method, uri: &hyper::Uri) -> Option<String> {
     }
     let segments = path.trim_start_matches('/').split('/').collect::<Vec<_>>();
     let allowed = match segments.as_slice() {
-        ["1.0"] | ["1.0", "compatibility" | "operations" | "events"] => *method == Method::GET,
+        ["1.0"]
+        | [
+            "1.0",
+            "compatibility" | "operations" | "events" | "storage-devices",
+        ] => *method == Method::GET,
         ["1.0", "resource-pool"] => matches!(*method, Method::GET | Method::PUT),
         ["1.0", "instances"] => matches!(*method, Method::GET | Method::POST),
         ["1.0", "instances", id] => {
@@ -405,6 +714,8 @@ fn daemon_path(method: &Method, uri: &hyper::Uri) -> Option<String> {
         ["1.0", "images", kind, id] => {
             *method == Method::GET && matches!(*kind, "kernel" | "initrd") && valid_token(id, 128)
         }
+        ["1.0", "os-images"] => matches!(*method, Method::GET | Method::POST),
+        ["1.0", "os-images", id] => *method == Method::GET && valid_token(id, 128),
         ["1.0", "operations", id] => {
             valid_token(id, 128) && matches!(*method, Method::GET | Method::DELETE)
         }
@@ -617,6 +928,34 @@ mod tests {
             )
             .is_none()
         );
+        let image_id = format!("sha256:{}", "a".repeat(64));
+        assert_eq!(
+            daemon_path(&Method::GET, &"/api/1.0/os-images".parse().unwrap()),
+            Some("/1.0/os-images".into())
+        );
+        assert_eq!(
+            daemon_path(&Method::POST, &"/api/1.0/os-images".parse().unwrap()),
+            Some("/1.0/os-images".into())
+        );
+        assert_eq!(
+            daemon_path(&Method::GET, &"/api/1.0/storage-devices".parse().unwrap()),
+            Some("/1.0/storage-devices".into())
+        );
+        assert!(daemon_path(&Method::POST, &"/api/1.0/storage-devices".parse().unwrap()).is_none());
+        assert_eq!(
+            daemon_path(
+                &Method::GET,
+                &format!("/api/1.0/os-images/{image_id}").parse().unwrap()
+            ),
+            Some(format!("/1.0/os-images/{image_id}"))
+        );
+        assert!(
+            daemon_path(
+                &Method::POST,
+                &format!("/api/1.0/os-images/{image_id}").parse().unwrap()
+            )
+            .is_none()
+        );
         assert!(daemon_path(&Method::GET, &"/api/1.0/../secret".parse().unwrap()).is_none());
     }
 
@@ -707,6 +1046,52 @@ mod tests {
             assert_eq!(requests[1].method, "POST");
             assert_eq!(requests[1].body, b"{}");
         }
+        let _ = stop_tx.send(());
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn browser_upload_is_streamed_to_private_staging_and_forwarded_as_metadata() {
+        let transport = MockTransport::default();
+        let observed = transport.requests.clone();
+        let upload_root = tempfile::tempdir().unwrap();
+        let mut gateway_config = config();
+        gateway_config.upload_dir = upload_root.path().to_owned();
+        gateway_config.max_upload_bytes = 1024;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+        let gateway = Gateway::new(gateway_config, transport).unwrap();
+        let server = tokio::spawn(gateway.serve(listener, async {
+            let _ = stop_rx.await;
+        }));
+        let boundary = "kernmux-test-boundary";
+        let body = format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"label\"\r\n\r\nUbuntu 24.04\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"expected_generation\"\r\n\r\n7\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"architecture\"\r\n\r\nx86_64\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"ubuntu.img\"\r\nContent-Type: application/octet-stream\r\n\r\ndisk-image-bytes\r\n--{boundary}--\r\n"
+        );
+        let request = format!(
+            "POST /api/1.0/os-images/upload HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nOrigin: http://127.0.0.1:9443\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            "a".repeat(48),
+            body.len(),
+        );
+
+        assert_status(&exchange(address, &request), 200);
+        {
+            let requests = observed.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].path, "/1.0/os-images");
+            let mutation: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(mutation["expected_generation"], 7);
+            assert_eq!(mutation["label"], "Ubuntu 24.04");
+            assert_eq!(mutation["architecture"], "x86_64");
+            assert!(
+                mutation["source_path"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with(upload_root.path().to_str().unwrap())
+            );
+        }
+        assert_eq!(std::fs::read_dir(upload_root.path()).unwrap().count(), 0);
         let _ = stop_tx.send(());
         server.await.unwrap().unwrap();
     }
